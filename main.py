@@ -13,7 +13,7 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 import yfinance as yf
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from google import genai
 from google.genai import types
 
@@ -407,18 +407,49 @@ async def handle_load_more(page, selector, click_count):
         except:
             break
 
-async def handle_rss_feed(rss_url):
+async def handle_rss_feed(page, rss_url):
+    """
+    Mengambil tautan dari RSS feed menggunakan Playwright untuk menghindari HTTP Error 403 (Forbidden)
+    """
     links = []
     try:
-        req = urllib.request.Request(rss_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'})
-        def parse_xml():
-            with urllib.request.urlopen(req, timeout=15) as response:
-                root = ET.fromstring(response.read())
-                return [item.find('link').text for item in root.findall('.//item') if item.find('link') is not None]
-        links = await asyncio.to_thread(parse_xml)
+        print(f"    [-] Mengunduh XML RSS via Browser: {rss_url}")
+        
+        # Menggunakan wait_until="commit" agar proses instan begitu data XML masuk ke browser
+        await page.goto(rss_url, wait_until="commit", timeout=20000)
+        
+        # Berikan jeda super singkat agar data XML terserap penuh di memory page
+        await page.wait_for_timeout(1000)
+        
+        # Ambil teks mentah XML dari halaman
+        xml_text = await page.content()
+        
+        # Bersihkan string XML jika Playwright membungkusnya dalam tag HTML bawaan browser (<pre> atau <html>)
+        if "<pre" in xml_text:
+            match = re.search(r'<pre[^>]*>(.*?)</pre>', xml_text, re.DOTALL)
+            if match:
+                xml_text = match.group(1)
+        
+        # Decode entitas HTML standar jika ada yang terkonversi oleh browser
+        xml_text = xml_text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").strip()
+        
+        # Cari tag <link> di dalam elemen <item> menggunakan regex agar lebih fleksibel 
+        # jika struktur XML sedikit rusak saat dibaca via page.content()
+        item_contents = re.findall(r'<item>(.*?)</item>', xml_text, re.DOTALL)
+        for item in item_contents:
+            link_match = re.search(r'<link>(.*?)</link>', item, re.DOTALL)
+            if link_match:
+                clean_url = link_match.group(1).strip()
+                # Singkirkan CDATA jika ada (misal: <![CDATA[https://...]])
+                clean_url = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', clean_url)
+                if clean_url.startswith("http"):
+                    links.append(clean_url)
+                    
+        return links # <-- POSISI REKOMENDASI: Mengembalikan data langsung saat proses SUKSES
+
     except Exception as e:
-        print(f"    [!] Gagal memproses RSS: {e}")
-    return links
+        print(f"    [!] Gagal memproses RSS via Browser: {e}")
+        return [] # <-- POSISI REKOMENDASI: Mengembalikan list kosong saat proses GAGAL
 
 async def fetch_article_data(context, url, semaphore, selector_extract=None, max_scroll_steps=15):
     async with semaphore:
@@ -536,19 +567,24 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
     
     try:
         if site["handling_method"] == "rss":
-            rss_links = await handle_rss_feed(site["url"])
+            rss_links = await handle_rss_feed(page, site["url"])
             urls_to_scrape = list(set(rss_links))[:int(site['max_articles'])]
         
         elif site["handling_method"] in ["infinite_scroll", "load_more_button"]:
             print(f"[-] Membuka beranda {site['name']}...")
-            await page.goto(site['url'], wait_until="domcontentloaded")
             
             try:
+                # Set timeout 30 detik untuk goto, wait_until cukup "load" saja
+                await page.goto(site['url'], wait_until="load", timeout=30000)
+                
                 # Coba tunggu jaringan sepi selama maks 5 detik
                 await page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:
-                # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
-                pass
+            except (asyncio.TimeoutError, PlaywrightTimeoutError):
+                # Jika timeout 5 detik di atas habis, jangan anggap ini error fatal.
+                # Cetak informasi ini dan biarkan skrip lanjut ke auto_scroll bawah.
+                print(f"    [-] Jaringan tidak sepenuhnya idle dalam 5 detik (banyak iklan/tracker), mengabaikan dan lanjut...")
+            except Exception as e:
+                print(f"    [!] Ada kendala lain saat memuat halaman: {e}")
         
             await auto_scroll(page, max_scroll_steps=10)
             if site["handling_method"] == "infinite_scroll":
@@ -575,14 +611,19 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             total_pages = int(site.get("total_pages", 1)) if site.get("total_pages") else int(site.get("click_count", 1))
             
             print(f"[-] Membuka beranda awal {site['name']}...")
-            await page.goto(site['url'], wait_until="domcontentloaded")
 
             try:
+                # Set timeout 30 detik untuk goto, wait_until cukup "load" saja
+                await page.goto(site['url'], wait_until="load", timeout=30000)
+                
                 # Coba tunggu jaringan sepi selama maks 5 detik
                 await page.wait_for_load_state("networkidle", timeout=5000)
-            except Exception:
-                # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
-                pass
+            except (asyncio.TimeoutError, PlaywrightTimeoutError):
+                # Jika timeout 5 detik di atas habis, jangan anggap ini error fatal.
+                # Cetak informasi ini dan biarkan skrip lanjut ke auto_scroll bawah.
+                print(f"    [-] Jaringan tidak sepenuhnya idle dalam 5 detik (banyak iklan/tracker), mengabaikan dan lanjut...")
+            except Exception as e:
+                print(f"    [!] Ada kendala lain saat memuat halaman: {e}")
 
             await auto_scroll(page, max_scroll_steps=10)
             
@@ -613,10 +654,10 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                         await page.wait_for_timeout(1000) # Jeda stabilisasi posisi atas
 
                         try:
-                            # Coba tunggu jaringan sepi selama maks 5 detik
                             await page.wait_for_load_state("networkidle", timeout=5000)
+                        except (asyncio.TimeoutError, PlaywrightTimeoutError):
+                            print(f"    [-] Jaringan tidak idle dalam 5 detik untuk {site['name']}, melanjutkan...")
                         except Exception:
-                            # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
                             pass
 
                         await auto_scroll(page, max_scroll_steps=10)
@@ -648,19 +689,31 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             for page_num in range(1, total_pages + 1):
                 target_url = f"{site['url']}{page_num}"
                 try:
-                    await page.goto(target_url, wait_until="domcontentloaded")
+                    # 1. Gunakan wait_until="load" dengan timeout eksplisit (misal 20 detik)
+                    # Ini mencegah skrip menggantung terlalu lama di satu halaman yang rusak
+                    await page.goto(target_url, wait_until="load", timeout=30000)
 
+                    # 2. Tunggu sebentar untuk networkidle, jika timeout (karena iklan), abaikan saja
                     try:
-                        # Coba tunggu jaringan sepi selama maks 5 detik
                         await page.wait_for_load_state("networkidle", timeout=5000)
+                    except (asyncio.TimeoutError, PlaywrightTimeoutError):
+                        # Hanya log biasa, bukan error fatal
+                        print(f"    [-] Jaringan halaman {page_num} tidak idle sepenuhnya (iklan aktif), lanjut scroll...")
                     except Exception:
-                        # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
                         pass
 
+                    # 3. Lakukan scroll dan ambil data jika halaman berhasil terbuka
                     await auto_scroll(page, max_scroll_steps=10)
                     raw_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
                     all_raw_links.extend(raw_links)
-                except:
+                    
+                except (asyncio.TimeoutError, PlaywrightTimeoutError) as t_err:
+                    # Jika page.goto yang timeout, lewati halaman ini dan lanjut ke page_num berikutnya
+                    print(f"    [!] Halaman {page_num} lambat/gagal dimuat (Timeout). Melompati ke halaman berikutnya...")
+                    continue
+                except Exception as page_err:
+                    # Jika ada error aneh lainnya pada halaman tersebut
+                    print(f"    [!] Error tidak terduga di halaman {page_num}: {page_err}. Melompati...")
                     continue
             
             unique_links = list(set([link for link in all_raw_links if link]))
