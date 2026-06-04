@@ -1,0 +1,5 @@
+pytz
+python-dotenv
+yfinance
+playwright
+google-genai
