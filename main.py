@@ -410,7 +410,7 @@ async def handle_load_more(page, selector, click_count):
 async def handle_rss_feed(rss_url):
     links = []
     try:
-        req = urllib.request.Request(rss_url, headers={'User-Agent': 'Mozilla/5.0'})
+        req = urllib.request.Request(rss_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'})
         def parse_xml():
             with urllib.request.urlopen(req, timeout=15) as response:
                 root = ET.fromstring(response.read())
@@ -435,7 +435,7 @@ async def fetch_article_data(context, url, semaphore, selector_extract=None, max
             if selector_extract:
                 try:
                     # Ambil berdasarkan selector spesifik terlebih dahulu
-                    inner_text = await page.inner_text(selector_extract)
+                    inner_text = await page.locator(selector_extract).first().innerText()
                 except Exception as selector_err:
                     # Jika selector gagal/tidak ditemukan, ambil seluruh isi body text
                     print(f"    [!] Selector '{selector_extract}' gagal pada {url} ({selector_err}). Menggunakan fallback seluruh teks...")
@@ -542,7 +542,14 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
         elif site["handling_method"] in ["infinite_scroll", "load_more_button"]:
             print(f"[-] Membuka beranda {site['name']}...")
             await page.goto(site['url'], wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=5000)
+            
+            try:
+                # Coba tunggu jaringan sepi selama maks 5 detik
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
+                pass
+        
             await auto_scroll(page, max_scroll_steps=10)
             if site["handling_method"] == "infinite_scroll":
                 await handle_infinite_scroll(page, int(site.get("click_count", 3)))
@@ -569,7 +576,14 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             
             print(f"[-] Membuka beranda awal {site['name']}...")
             await page.goto(site['url'], wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=5000)
+
+            try:
+                # Coba tunggu jaringan sepi selama maks 5 detik
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
+                pass
+
             await auto_scroll(page, max_scroll_steps=10)
             
             # Ambil tautan dari halaman pertama terlebih dahulu
@@ -598,7 +612,13 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                         await page.evaluate("window.scrollTo(0, 0);")
                         await page.wait_for_timeout(1000) # Jeda stabilisasi posisi atas
 
-                        await page.wait_for_load_state("networkidle", timeout=5000)
+                        try:
+                            # Coba tunggu jaringan sepi selama maks 5 detik
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
+                            pass
+
                         await auto_scroll(page, max_scroll_steps=10)
                         
                         # Ambil tautan dari halaman baru ini
@@ -629,7 +649,14 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 target_url = f"{site['url']}{page_num}"
                 try:
                     await page.goto(target_url, wait_until="domcontentloaded")
-                    await page.wait_for_load_state("networkidle", timeout=5000)
+
+                    try:
+                        # Coba tunggu jaringan sepi selama maks 5 detik
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        # Jika khusus error karena timeout 5 detik, diamkan dan abaikan
+                        pass
+
                     await auto_scroll(page, max_scroll_steps=10)
                     raw_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
                     all_raw_links.extend(raw_links)
