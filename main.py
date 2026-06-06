@@ -218,28 +218,58 @@ def fetch_yahoo_finance_data(tickers_dict):
     waktu_sekarang = f"{hari_indo}, {now.strftime('%d')} {bulan_indo} {now.strftime('%Y')}"
     
     financial_summary = []
-    for nama, detail in tickers_dict.items():
+    
+    # Mengonversi dict_items menjadi list agar kita bisa tahu posisi index akhir
+    tickers_list = list(tickers_dict.items())
+    total_tickers = len(tickers_list)
+    
+    for idx, (nama, detail) in enumerate(tickers_list):
         try:
             kode = detail.get("ticker")
-            periode = detail.get("period", "1d")
+            fmt_pola = detail.get("format", "{}") 
+            # Mengambil parameter periode, jika tidak diatur maka default-nya 5 hari ('5d')
+            periode = detail.get("period", "5d") 
+            
             if not kode:
                 continue
                 
             ticker = yf.Ticker(str(kode).strip())
-            hist = ticker.history(period=periode)
+            # Memasukkan variabel periode yang dinamis ke dalam history()
+            hist = ticker.history(period=periode, interval="1d")
+            
             if not hist.empty:
-                harga_terakhir = hist['Close'].iloc[-1]
-                harga_buka = hist['Open'].iloc[-1]
-                perubahan_persen = ((harga_terakhir - harga_buka) / harga_buka) * 100
-                tanda = "+" if perubahan_persen >= 0 else ""
-                financial_summary.append(f"{nama}: {harga_terakhir:,.2f} ({tanda}{perubahan_persen:.2f}%)")
+                # Mengubah 'd' menjadi ' hari' agar teks laporan berbahasa Indonesia (contoh: 14d -> 14 hari)
+                durasi_indo = periode.replace("d", " hari")
+                financial_summary.append(f"=== {nama} ({durasi_indo}) ===")
+                
+                for tanggal, baris in hist.iterrows():
+                    harga_terakhir = baris['Close']
+                    harga_buka = baris['Open']
+                    tgl_str = tanggal.strftime("%Y-%m-%d")
+                    
+                    # 1. Hitung perubahan persen harian
+                    perubahan_persen = ((harga_terakhir - harga_buka) / harga_buka) * 100
+                    
+                    # 2. Format harga dasar sesuai pola dari dictionary
+                    harga_terformat = fmt_pola.format(harga_terakhir)
+                    
+                    # 3. Gabungkan harga terformat dengan persentase
+                    baris_laporan = f"Tanggal: {tgl_str} | {harga_terformat} ({perubahan_persen:+.2f}%)"
+                    
+                    financial_summary.append(baris_laporan)
+                
+                # MODIFIKASI: Hanya tambahkan garis pembatas jika BUKAN item terakhir
+                if idx < total_tickers - 1:
+                    financial_summary.append("-" * 40)
+                    financial_summary.append("")
+                
         except Exception as e:
             print(f"    [!] Gagal mengambil data {nama}: {e}")
             
-    if financial_summary:
-        isi_berita_finansial = " | ".join(financial_summary)
-        # Menghasilkan baris data yang tepat sesuai urutan ["Tanggal", "Isi Berita", "URL"]
-        return [waktu_sekarang, f"Rangkuman Pasar Finansial Global - {isi_berita_finansial}", "https://finance.yahoo.com"]
+    if len(financial_summary) > 1:
+        isi_berita_finansial = "\n".join(financial_summary)
+        return [waktu_sekarang, isi_berita_finansial, "https://finance.yahoo.com"]
+    
     return None
 
 # ==========================================
@@ -749,29 +779,25 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
 
         if final_extracted_data.strip():
             print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
-            lines = final_extracted_data.strip().splitlines()
             
-            # Membuang baris header jika Gemini tidak sengaja menyertakannya
-            if lines and ("Tanggal" in lines[0] or "Isi Berita" in lines[0] or "URL" in lines[0]):
-                lines_to_process = lines[1:]
-            else:
-                lines_to_process = lines
+            # Solusi 3: Menggunakan io.StringIO agar teks dibaca layaknya file utuh
+            f_input = io.StringIO(final_extracted_data.strip())
+            # Solusi 2: Memanfaatkan modul csv.reader resmi Python untuk parsing text
+            reader_gemini = csv.reader(f_input, delimiter=',', quotechar='"')
             
-            # Membuka berkas Master CSV dengan mode Append ('a') secara aman
             with open(master_file_name, 'a', newline='', encoding='utf-8') as f_append:
                 writer = csv.writer(f_append, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
                 
-                for line in lines_to_process:
-                    if not line.strip():
+                for parsed_row in reader_gemini:
+                    if not parsed_row:
                         continue
                     
-                    try:
-                        # SOLUSI ROBUST: Gunakan csv.reader untuk membaca satu baris teks dari Gemini.
-                        # csv.reader sangat cerdas, ia tahu bahwa koma di dalam tanda kutip ganda 
-                        # (baik pada tanggal maupun isi berita) BUKANLAH pembatas kolom.
-                        reader = csv.reader(io.StringIO(line.strip()), delimiter=',', quotechar='"')
-                        parsed_row = next(reader)
+                    # Solusi 1: Deteksi Header Dinamis di baris mana pun
+                    if any(header_word in parsed_row[0] for header_word in ["Tanggal", "Isi Berita", "URL"]):
+                        continue
                         
+                    try:
+                        # Sekarang parsed_row sudah otomatis menjadi LIST yang bersih ([kolom1, kolom2, kolom3])
                         if len(parsed_row) >= 3:
                             tanggal = parsed_row[0].strip()
                             isi_berita = parsed_row[1].strip()
@@ -780,15 +806,12 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                             if len(isi_berita) > 10:
                                 writer.writerow([tanggal, isi_berita, url])
                         else:
-                            # Fallback jika baris tidak lengkap
-                            clean_line = line.strip().strip('"')
-                            if len(clean_line) > 10:
-                                writer.writerow(["-", clean_line, site.get('url', '-')])
+                            # Fallback jika baris tidak sengaja kekurangan kolom
+                            join_row = " ".join(parsed_row).strip()
+                            if len(join_row) > 10:
+                                writer.writerow(["-", join_row, site.get('url', '-')])
                     except Exception as parse_err:
-                        # Jika baris benar-benar rusak fatal dan gagal di-parse oleh csv.reader
-                        clean_line = line.strip().strip('"')
-                        if len(clean_line) > 10:
-                            writer.writerow(["-", clean_line, site.get('url', '-')])
+                        print(f"    [!] Gagal memproses baris data: {parse_err}")
                             
     except Exception as e:
         print(f"[!] Kendala di situs {site['name']}: {e}")
@@ -799,7 +822,8 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
 # MAIN ROUTINE
 # ==========================================
 async def main():
-    # Memuat data dinamis di awal program
+    # [1] Memuat data dinamis di awal program
+    # [1] Memuat data dinamis di awal program
     WEBSITES, PROMPTS_DATA, TICKERS = await fetch_dynamic_config(WEB_APP_SCRIPT_URL)
     PROMPT_DASAR_FORMAT = PROMPTS_DATA.get("PROMPT_DASAR_FORMAT", "")
 
@@ -816,7 +840,8 @@ async def main():
     if not os.path.exists(folder_db):
         os.makedirs(folder_db)
 
-    # Membuat file master lokal baru berdasarkan timestamp eksekusi hari ini
+    # [2] Membuat file master lokal baru berdasarkan timestamp eksekusi hari ini
+    # [2] Membuat file master lokal baru berdasarkan timestamp eksekusi hari ini
     waktu_skrg = datetime.now(pytz.timezone("Asia/Jakarta")).strftime("%Y%m%d_%H%M%S")
     master_file_name = f"{folder_db}/master_berita_{waktu_skrg}.csv"
 
@@ -831,17 +856,62 @@ async def main():
             writer = csv.writer(final_csv_file)
             writer.writerow(["Tanggal", "Isi Berita", "URL"])
 
-    # Ambil data finansial Yahoo secara dinamis
+    # [3] Ambil data finansial Yahoo secara dinamis
+    # [3] Ambil data finansial Yahoo secara dinamis
     finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
     if finansial_row:
         with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
             writer = csv.writer(final_csv_file)
             writer.writerow(finansial_row)
-        # Mengubah baris print agar mencetak nama file yang spesifik sesuai tanggal
         print(f"[+] Sukses menyimpan data finansial Yahoo ke file master lokal: {master_file_name}\n")
         
-    # Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
-# Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
+        # =====================================================================
+        # TAMBAHAN: KIRIM DATA YAHOO FINANCE LANGSUNG KE TELEGRAM
+        # =====================================================================
+        try:
+            zona_wib = pytz.timezone('Asia/Jakarta')
+            now_realtime = datetime.now(zona_wib)
+            
+            hari_en_to_id = {
+                "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
+                "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
+            }
+            bulan_en_to_id = {
+                "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
+                "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
+                "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
+            }
+            
+            hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
+            bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
+            
+            waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
+            tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
+            
+            # Header sesuai permintaan Anda
+            header_pesan_yahoo = (
+                f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
+                f"<b>Data Pergerakan Harga</b>\n"
+                f"────────────────────\n\n"
+            )
+            
+            # isi_berita_finansial ada di index ke-1 dari finansial_row
+            isi_konten_yahoo = finansial_row[1]
+            isi_konten_yahoo = re.sub(r'(===.*?===)', r'<b>\1</b>', isi_konten_yahoo)
+            pesan_full_yahoo = header_pesan_yahoo + isi_konten_yahoo
+            
+            print("[-] Mengirimkan data Yahoo Finance ke Telegram...")
+            await asyncio.to_thread(send_telegram_message, pesan_full_yahoo)
+            print("[+] Data Yahoo Finance berhasil dikirim ke Telegram.")
+            
+            # Jeda singkat setelah kirim pesan agar aman dari rate limit Telegram
+            await asyncio.sleep(3)
+            
+        except Exception as telegram_yahoo_err:
+            print(f"[!] Gagal mengirim data Yahoo Finance ke Telegram: {telegram_yahoo_err}")
+        
+    # [4] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
+    # [4] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
     if not WEBSITES:
         print("[!] Tidak ada target website yang dimuat dari Spreadsheet. Langsung melompat ke analisis.")
     else:
@@ -873,7 +943,8 @@ async def main():
             
             await browser.close()
 
-    # Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # [5] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # [5] Eksekusi analisis berurutan setelah data terkumpul lengkap
     await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
 
 if __name__ == "__main__":
