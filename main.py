@@ -5,6 +5,7 @@ import csv
 import io
 import re
 import os
+import pandas as pd
 import urllib.request
 import urllib.parse
 import json
@@ -193,6 +194,187 @@ async def ask_gemini_with_inline_csv(prompt, csv_string):
     return ""
 
 # ==========================================
+# FUNGSI AMBIL DATA SAHAM TERBAIK IDX (SESUAI HEADER 3 KOLOM)
+# ==========================================
+async def saham_lq45_terbaik_idx():
+    print("[-] Mengambil data Saham LQ45 terbaik dari IDX...")
+
+    jumlah_pilihan = 10
+    
+    saham_lq45 = {
+        "AADI", "ADMR", "ADRO", "AKRA", "AMMN", "AMRT", "ANTM", 
+        "ASII", "BBCA", "BBNI", "BBRI", "BBTN", "BMRI", "BRPT", 
+        "BUMI", "CPIN", "CUAN", "DEWA", "EMTK", "ESSA", "EXCL", 
+        "GOTO", "HRTA", "ICBP", "INCO", "INDF", "INKP", "ISAT", 
+        "ITMG", "JPFA", "KLBF", "MAPI", "MBMA", "MDKA", "MEDC", 
+        "PGAS", "PGEO", "PTBA", "SCMA", "SMGR", "TLKM", "TOWR", 
+        "UNTR", "UNVR", "WIFI"
+    }
+    
+    data_saham = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        
+        target_url = "https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=1000&start=0"
+        
+        try:
+            response = await page.goto(target_url, wait_until="networkidle")
+            if response.status == 200:
+                raw_text = await page.locator("body").inner_text()
+                json_data = json.loads(raw_text)
+                data_saham = json_data.get('data', [])
+            else:
+                print(f"[!] Gagal mengambil data. Status Code: {response.status}")
+                await browser.close()
+                return None
+        except Exception as e:
+            print(f"[!] Terjadi kesalahan saat membaca data: {e}")
+            await browser.close()
+            return None
+            
+        await browser.close()
+
+    pool_saham = []
+    
+    for stock in data_saham:
+        ticker = stock.get('StockCode', '').strip()
+        stock_name = stock.get('StockName', '').strip()
+        
+        if ticker in saham_lq45:
+            harga_previous_close = stock.get('Previous', 0)
+            harga_open = stock.get('OpenPrice', 0)
+            harga_high = stock.get('High', 0)
+            harga_low = stock.get('Low', 0)
+            harga_close = stock.get('Close', 0)
+            
+            volume_lembar = stock.get('Volume', 0)
+            nilai_transaksi_total = stock.get('Value', 0)
+            
+            if volume_lembar > 0 and nilai_transaksi_total > 0:
+                harga_rata_rata = nilai_transaksi_total / volume_lembar
+            else:
+                harga_rata_rata = harga_close
+            
+            foreign_buy_shares = stock.get('ForeignBuy', 0)
+            foreign_sell_shares = stock.get('ForeignSell', 0)
+            foreign_net_shares = foreign_buy_shares - foreign_sell_shares
+            
+            domestic_buy_shares = volume_lembar - foreign_buy_shares
+            domestic_sell_shares = volume_lembar - foreign_sell_shares
+            domestic_net_shares = domestic_buy_shares - domestic_sell_shares
+            
+            foreign_buy_val = foreign_buy_shares * harga_rata_rata
+            foreign_sell_val = foreign_sell_shares * harga_rata_rata
+            foreign_net_val = foreign_buy_val - foreign_sell_val
+            
+            domestic_buy_val = nilai_transaksi_total - foreign_buy_val
+            domestic_sell_val = nilai_transaksi_total - foreign_sell_val
+            domestic_net_val = domestic_buy_val - domestic_sell_val
+            
+            pool_saham.append({
+                "Ticker": ticker,
+                "Stock_Name": stock_name,
+                "Harga_Previous_Close": harga_previous_close,
+                "Harga_Open": harga_open,
+                "Harga_High": harga_high,
+                "Harga_Low": harga_low,
+                "Harga_Close": harga_close,
+                "Harga_Rata_Rata": harga_rata_rata,
+                "Volume": volume_lembar,
+                "Nilai_Transaksi": nilai_transaksi_total,
+                
+                "Foreign_Buy_Vol": foreign_buy_shares,
+                "Foreign_Sell_Vol": foreign_sell_shares,
+                "Foreign_Net_Vol": foreign_net_shares,
+                "Domestic_Buy_Vol": domestic_buy_shares,
+                "Domestic_Sell_Vol": domestic_sell_shares,
+                "Domestic_Net_Vol": domestic_net_shares,
+                
+                "Foreign_Buy_Val": foreign_buy_val,
+                "Foreign_Sell_Val": foreign_sell_val,
+                "Foreign_Net_Val": foreign_net_val,
+                "Domestic_Buy_Val": domestic_buy_val,
+                "Domestic_Sell_Val": domestic_sell_val,
+                "Domestic_Net_Val": domestic_net_val
+            })
+            
+    if not pool_saham:
+        print("[!] Tidak ada saham LQ45 yang cocok ditemukan hari ini.")
+        return None
+        
+    df = pd.DataFrame(pool_saham)
+    df_sorted = df.sort_values(by="Nilai_Transaksi", ascending=False)
+    top_rekomendasi = df_sorted.head(jumlah_pilihan)
+    
+    # --- LOGIKA FORMAT WAKTU (SAMA DENGAN YAHOO FINANCE) ---
+    hari_en_to_id = {
+        "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
+        "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
+    }
+    bulan_en_to_id = {
+        "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
+        "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
+        "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
+    }
+    
+    zona_wib = pytz.timezone('Asia/Jakarta')
+    now = datetime.now(zona_wib)
+    hari_indo = hari_en_to_id.get(now.strftime("%A"), now.strftime("%A"))
+    bulan_indo = bulan_en_to_id.get(now.strftime("%B"), now.strftime("%B"))
+    waktu_sekarang = f"{hari_indo}, {now.strftime('%d')} {bulan_indo} {now.strftime('%Y')}"
+    
+    # --- PROSES GABUNG TEXT KE LIST ---
+    financial_summary = []
+    total_tickers = len(top_rekomendasi)
+    
+    for idx, row in enumerate(top_rekomendasi.itertuples(), start=1):
+        f_net_val_str = f"+Rp{row.Foreign_Net_Val:,.0f}" if row.Foreign_Net_Val >= 0 else f"-Rp{abs(row.Foreign_Net_Val):,.0f}"
+        d_net_val_str = f"+Rp{row.Domestic_Net_Val:,.0f}" if row.Domestic_Net_Val >= 0 else f"-Rp{abs(row.Domestic_Net_Val):,.0f}"
+        
+        f_net_vol_str = f"+{row.Foreign_Net_Vol:,.0f}" if row.Foreign_Net_Vol >= 0 else f"{row.Foreign_Net_Vol:,.0f}"
+        d_net_vol_str = f"+{row.Domestic_Net_Vol:,.0f}" if row.Domestic_Net_Vol >= 0 else f"{row.Domestic_Net_Vol:,.0f}"
+        
+        emoji_foreign = "🔴" if row.Foreign_Net_Val < 0 else "🟢"
+        emoji_domestic = "🔴" if row.Domestic_Net_Val < 0 else "🟢"
+
+        financial_summary.append(f"<b>[{idx}] {row.Ticker}</b> - {row.Stock_Name}")
+        financial_summary.append(f" - Open/Pre    : Rp {row.Harga_Open:,.0f} / Rp {row.Harga_Previous_Close:,.0f}")          
+        financial_summary.append(f" - High/Low    : Rp {row.Harga_High:,.0f} / Rp {row.Harga_Low:,.0f}")          
+        financial_summary.append(f" - Close/Avg   : Rp {row.Harga_Close:,.0f} / Rp {row.Harga_Rata_Rata:,.2f}")       
+        financial_summary.append(f" - Volume Total    : {row.Volume:,.0f} lembar")
+        financial_summary.append(f" - Transaksi Total : Rp {row.Nilai_Transaksi:,.0f}")
+        financial_summary.append("-"*45)
+        
+        financial_summary.append(f"{emoji_foreign} <b>Foreign (Asing)</b>")
+        financial_summary.append(f"├─ Buy: {row.Foreign_Buy_Vol:,.0f} Lbr")
+        financial_summary.append(f"│    ↳ Rp {row.Foreign_Buy_Val:,.0f}")
+        financial_summary.append(f"├─ Sell: {row.Foreign_Sell_Vol:,.0f} Lbr")
+        financial_summary.append(f"│    ↳ Rp {row.Foreign_Sell_Val:,.0f}")
+        financial_summary.append(f"└─ Net: {f_net_vol_str} Lbr")
+        financial_summary.append(f"       ↳ {f_net_val_str}")
+        financial_summary.append("")
+        
+        financial_summary.append(f"{emoji_domestic} <b>Domestic (Lokal)</b>")
+        financial_summary.append(f"├─ Buy: {row.Domestic_Buy_Vol:,.0f} Lbr")
+        financial_summary.append(f"│    ↳ Rp {row.Domestic_Buy_Val:,.0f}")
+        financial_summary.append(f"├─ Sell: {row.Domestic_Sell_Vol:,.0f} Lbr")
+        financial_summary.append(f"│    ↳ Rp {row.Domestic_Sell_Val:,.0f}")
+        financial_summary.append(f"└─ Net: {d_net_vol_str} Lbr")
+        financial_summary.append(f"       ↳  {d_net_val_str}")
+        financial_summary.append("")
+            
+    if len(financial_summary) > 1:
+        isi_berita_finansial = "\n".join(financial_summary)
+        return [waktu_sekarang, isi_berita_finansial, "https://www.idx.co.id"]
+    
+    return None
+
+# ==========================================
 # FUNGSI AMBIL DATA YAHOO FINANCE (SESUAI HEADER 3 KOLOM)
 # ==========================================
 def fetch_yahoo_finance_data(tickers_dict):
@@ -229,38 +411,66 @@ def fetch_yahoo_finance_data(tickers_dict):
             fmt_pola = detail.get("format", "{}") 
             # Mengambil parameter periode, jika tidak diatur maka default-nya 5 hari ('5d')
             periode = detail.get("period", "5d") 
+            interval = detail.get("interval", "1d") 
             
             if not kode:
                 continue
                 
             ticker = yf.Ticker(str(kode).strip())
             # Memasukkan variabel periode yang dinamis ke dalam history()
-            hist = ticker.history(period=periode, interval="1d")
+            hist = ticker.history(period=periode, interval=interval)
             
             if not hist.empty:
-                # Mengubah 'd' menjadi ' hari' agar teks laporan berbahasa Indonesia (contoh: 14d -> 14 hari)
-                durasi_indo = periode.replace("d", " hari")
-                financial_summary.append(f"=== {nama} ({durasi_indo}) ===")
+                financial_summary.append(f"➡️ <b>{nama}</b>")
+                
+                # Inisialisasi variabel untuk menampung baris data sebelumnya
+                prev_baris = None
                 
                 for tanggal, baris in hist.iterrows():
-                    harga_terakhir = baris['Close']
-                    harga_buka = baris['Open']
-                    tgl_str = tanggal.strftime("%Y-%m-%d")
-                    
+                    perubahan_persen = 0
+                    harga_hari_kemarin = None
+                    harga_hari_ini = None
+                    tgl_str = tanggal.strftime("%d-%b-%Y")
+
+                    # Jika ini adalah baris pertama, kita belum punya data hari sebelumnya.
+                    # Maka kita simpan baris ini sebagai prev_baris dan lanjut ke hari berikutnya.
+                    if prev_baris is None:
+                        prev_baris = baris
+                        harga_hari_ini = baris['Close']
+                    else:
+                        # "harga_hari_kemarin" adalah data sebelumnya (Close dari hari sebelumnya)
+                        harga_hari_kemarin = prev_baris['Close']
+                        
+                        # "harga_hari_ini" adalah harga saat ini (Close dari hari ini/saat ini)
+                        harga_hari_ini = baris['Close']
+                        
                     # 1. Hitung perubahan persen harian
-                    perubahan_persen = ((harga_terakhir - harga_buka) / harga_buka) * 100
+                    if harga_hari_kemarin and harga_hari_kemarin != 0:
+                        perubahan_persen = ((harga_hari_ini - harga_hari_kemarin) / harga_hari_kemarin) * 100
+                    else:
+                        perubahan_persen = 0
                     
-                    # 2. Format harga dasar sesuai pola dari dictionary
-                    harga_terformat = fmt_pola.format(harga_terakhir)
+                    # 2. Logika penentuan emoji panah (Naik = 🔼 hijau/biru di beberapa device, atau bisa diganti 🟢)
+                    if perubahan_persen > 0:
+                        panah = "🟢"  # Panah Naik
+                    elif perubahan_persen < 0:
+                        panah = "🔴"  # Panah Turun Merah
+                    else:
+                        panah = "🔵"  # Stagnan
+
+                    # 3. Format harga dasar sesuai pola dari dictionary
+                    harga_terformat = fmt_pola.format(harga_hari_ini)
                     
-                    # 3. Gabungkan harga terformat dengan persentase
-                    baris_laporan = f"Tanggal: {tgl_str} | {harga_terformat} ({perubahan_persen:+.2f}%)"
+                    # 4. Gabungkan harga terformat dengan persentase
+                    baris_laporan = f"• {tgl_str} : <b>{harga_terformat}</b> ({perubahan_persen:+.2f}%) {panah}"
                     
                     financial_summary.append(baris_laporan)
+
+                    # Simpan baris saat ini untuk menjadi 'prev_baris' pada perulangan hari berikutnya
+                    prev_baris = baris
                 
                 # MODIFIKASI: Hanya tambahkan garis pembatas jika BUKAN item terakhir
                 if idx < total_tickers - 1:
-                    financial_summary.append("-" * 40)
                     financial_summary.append("")
                 
         except Exception as e:
@@ -856,13 +1066,61 @@ async def main():
             writer = csv.writer(final_csv_file)
             writer.writerow(["Tanggal", "Isi Berita", "URL"])
 
-    # [3] Ambil data finansial Yahoo secara dinamis
-    # [3] Ambil data finansial Yahoo secara dinamis
-    finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
-    if finansial_row:
+    # [3] Ambil data Saham LQ45 IDX secara dinamis
+    # [3] Ambil data Saham LQ45 IDX secara dinamis
+    idx_lq45_row = await saham_lq45_terbaik_idx()
+    if idx_lq45_row:
+        waktu_idx = idx_lq45_row[0]
+        isi_konten_idx = idx_lq45_row[1]
+        url_idx = idx_lq45_row[2]
+
+        isi_konten_simpan_idx = "DATA Top SAHAM LQ45 IDX TERBARU\n" + isi_konten_idx
+        data_simpan_idx_lq45_row = [waktu_idx, isi_konten_simpan_idx, url_idx]
+       
         with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
             writer = csv.writer(final_csv_file)
-            writer.writerow(finansial_row)
+            writer.writerow(data_simpan_idx_lq45_row)
+        print(f"[+] Sukses menyimpan data Saham LQ45 IDX ke file master lokal: {master_file_name}\n")
+        
+        try:
+            zona_wib = pytz.timezone('Asia/Jakarta')
+            now_realtime = datetime.now(zona_wib)
+            hari_en_to_id = {"Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"}
+            bulan_en_to_id = {"January": "Januari", "February": "Februari", "March": "Maret", "April": "April", "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus", "September": "September", "October": "Oktober", "November": "November", "December": "Desember"}
+            hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
+            bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
+            waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
+            tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
+            
+            header_pesan_idx = (
+                f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
+                f"<b>REKOMENDASI SAHAM LQ45 IDX TERBAIK HARI INI</b>\n"
+                f"────────────────────\n\n"
+            )
+            
+            pesan_full_idx = header_pesan_idx + isi_konten_idx
+            
+            print("[-] Mengirimkan data Saham LQ45 IDX ke Telegram...")
+            await asyncio.to_thread(send_telegram_message, pesan_full_idx)
+            print("[+] Data Saham LQ45 IDX berhasil dikirim ke Telegram.")
+            await asyncio.sleep(3)
+        except Exception as telegram_idx_err:
+            print(f"[!] Gagal mengirim data IDX ke Telegram: {telegram_idx_err}")
+
+    # [4] Ambil data finansial Yahoo secara dinamis
+    # [4] Ambil data finansial Yahoo secara dinamis
+    finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
+    if finansial_row:
+        waktu_yahoo = finansial_row[0]
+        isi_konten_yahoo = finansial_row[1]
+        url_yahoo = finansial_row[2]
+        
+        isi_konten_simpan_yahoo = "DATA HARGA MULTI ASET TERBARU\n" + isi_konten_yahoo
+        data_simpan_yahoo_row = [waktu_yahoo, isi_konten_simpan_yahoo, url_yahoo]
+
+        with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
+            writer = csv.writer(final_csv_file)
+            writer.writerow(data_simpan_yahoo_row)
         print(f"[+] Sukses menyimpan data finansial Yahoo ke file master lokal: {master_file_name}\n")
         
         # =====================================================================
@@ -896,7 +1154,6 @@ async def main():
             )
             
             # isi_berita_finansial ada di index ke-1 dari finansial_row
-            isi_konten_yahoo = finansial_row[1]
             isi_konten_yahoo = re.sub(r'(===.*?===)', r'<b>\1</b>', isi_konten_yahoo)
             pesan_full_yahoo = header_pesan_yahoo + isi_konten_yahoo
             
@@ -910,8 +1167,8 @@ async def main():
         except Exception as telegram_yahoo_err:
             print(f"[!] Gagal mengirim data Yahoo Finance ke Telegram: {telegram_yahoo_err}")
         
-    # [4] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
-    # [4] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
+    # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
+    # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
     if not WEBSITES:
         print("[!] Tidak ada target website yang dimuat dari Spreadsheet. Langsung melompat ke analisis.")
     else:
@@ -943,8 +1200,8 @@ async def main():
             
             await browser.close()
 
-    # [5] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    # [5] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
     await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
 
 if __name__ == "__main__":
