@@ -1138,119 +1138,119 @@ async def main():
         except Exception as telegram_idx_err:
             print(f"[!] Gagal mengirim data IDX ke Telegram: {telegram_idx_err}")
 
-    # [4] Ambil data finansial Yahoo secara dinamis
-    # [4] Ambil data finansial Yahoo secara dinamis
-    finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
-    if finansial_row:
-        waktu_yahoo = finansial_row[0]
-        isi_konten_yahoo = finansial_row[1]
-        url_yahoo = finansial_row[2]
+    # # [4] Ambil data finansial Yahoo secara dinamis
+    # # [4] Ambil data finansial Yahoo secara dinamis
+    # finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
+    # if finansial_row:
+    #     waktu_yahoo = finansial_row[0]
+    #     isi_konten_yahoo = finansial_row[1]
+    #     url_yahoo = finansial_row[2]
         
-        isi_konten_simpan_yahoo = "DATA HARGA MULTI ASET TERBARU\n" + isi_konten_yahoo
-        data_simpan_yahoo_row = [waktu_yahoo, isi_konten_simpan_yahoo, url_yahoo]
+    #     isi_konten_simpan_yahoo = "DATA HARGA MULTI ASET TERBARU\n" + isi_konten_yahoo
+    #     data_simpan_yahoo_row = [waktu_yahoo, isi_konten_simpan_yahoo, url_yahoo]
 
-        with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
-            writer = csv.writer(final_csv_file)
-            writer.writerow(data_simpan_yahoo_row)
-        print(f"[+] Sukses menyimpan data finansial Yahoo ke file master lokal: {master_file_name}\n")
+    #     with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
+    #         writer = csv.writer(final_csv_file)
+    #         writer.writerow(data_simpan_yahoo_row)
+    #     print(f"[+] Sukses menyimpan data finansial Yahoo ke file master lokal: {master_file_name}\n")
         
-        # =====================================================================
-        # TAMBAHAN: KIRIM DATA YAHOO FINANCE LANGSUNG KE TELEGRAM
-        # =====================================================================
-        try:
-            zona_wib = pytz.timezone('Asia/Jakarta')
-            now_realtime = datetime.now(zona_wib)
+    #     # =====================================================================
+    #     # TAMBAHAN: KIRIM DATA YAHOO FINANCE LANGSUNG KE TELEGRAM
+    #     # =====================================================================
+    #     try:
+    #         zona_wib = pytz.timezone('Asia/Jakarta')
+    #         now_realtime = datetime.now(zona_wib)
             
-            hari_en_to_id = {
-                "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
-                "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
-            }
-            bulan_en_to_id = {
-                "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
-                "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
-                "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
-            }
+    #         hari_en_to_id = {
+    #             "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
+    #             "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
+    #         }
+    #         bulan_en_to_id = {
+    #             "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
+    #             "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
+    #             "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
+    #         }
             
-            hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
-            bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
+    #         hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
+    #         bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
             
-            waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
-            tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
+    #         waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
+    #         tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
             
-            # Header sesuai permintaan Anda
-            header_pesan_yahoo = (
-                f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
-                f"<b>Data Pergerakan Harga</b>\n"
-                f"────────────────────\n\n"
-            )
+    #         # Header sesuai permintaan Anda
+    #         header_pesan_yahoo = (
+    #             f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
+    #             f"<b>Data Pergerakan Harga</b>\n"
+    #             f"────────────────────\n\n"
+    #         )
             
-            # isi_berita_finansial ada di index ke-1 dari finansial_row
-            isi_konten_yahoo = re.sub(r'(===.*?===)', r'<b>\1</b>', isi_konten_yahoo)
-            pesan_full_yahoo = header_pesan_yahoo + isi_konten_yahoo
+    #         # isi_berita_finansial ada di index ke-1 dari finansial_row
+    #         isi_konten_yahoo = re.sub(r'(===.*?===)', r'<b>\1</b>', isi_konten_yahoo)
+    #         pesan_full_yahoo = header_pesan_yahoo + isi_konten_yahoo
             
-            print("[-] Mengirimkan data Yahoo Finance ke Telegram...")
-            await asyncio.to_thread(send_telegram_message, pesan_full_yahoo)
-            print("[+] Data Yahoo Finance berhasil dikirim ke Telegram.")
+    #         print("[-] Mengirimkan data Yahoo Finance ke Telegram...")
+    #         await asyncio.to_thread(send_telegram_message, pesan_full_yahoo)
+    #         print("[+] Data Yahoo Finance berhasil dikirim ke Telegram.")
             
-            # Jeda singkat setelah kirim pesan agar aman dari rate limit Telegram
-            await asyncio.sleep(3)
+    #         # Jeda singkat setelah kirim pesan agar aman dari rate limit Telegram
+    #         await asyncio.sleep(3)
             
-        except Exception as telegram_yahoo_err:
-            print(f"[!] Gagal mengirim data Yahoo Finance ke Telegram: {telegram_yahoo_err}")
+    #     except Exception as telegram_yahoo_err:
+    #         print(f"[!] Gagal mengirim data Yahoo Finance ke Telegram: {telegram_yahoo_err}")
         
-    # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
-    # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
-    if not WEBSITES:
-        print("[!] Tidak ada target website yang dimuat dari Spreadsheet. Langsung melompat ke analisis.")
-    else:
-        async with async_playwright() as p:
-            # Mengaktifkan headless=True agar berjalan mulus tanpa antarmuka GUI di GitHub Actions
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled', # Menyembunyikan jejak otomatisasi webdriver
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-infobars',
-                    '--window-position=0,0',
-                    '--ignore-certificate-errors',
-                    '--ignore-certificate-errors-spki-list',
-                ]
-            )
+    # # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
+    # # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
+    # if not WEBSITES:
+    #     print("[!] Tidak ada target website yang dimuat dari Spreadsheet. Langsung melompat ke analisis.")
+    # else:
+    #     async with async_playwright() as p:
+    #         # Mengaktifkan headless=True agar berjalan mulus tanpa antarmuka GUI di GitHub Actions
+    #         browser = await p.chromium.launch(
+    #             headless=True,
+    #             args=[
+    #                 '--disable-blink-features=AutomationControlled', # Menyembunyikan jejak otomatisasi webdriver
+    #                 '--no-sandbox',
+    #                 '--disable-setuid-sandbox',
+    #                 '--disable-infobars',
+    #                 '--window-position=0,0',
+    #                 '--ignore-certificate-errors',
+    #                 '--ignore-certificate-errors-spki-list',
+    #             ]
+    #         )
 
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720},
-                locale="id-ID", # Menyamakan regional seolah dari Indonesia
-                timezone_id="Asia/Jakarta"
-            )
+    #         context = await browser.new_context(
+    #             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    #             viewport={"width": 1280, "height": 720},
+    #             locale="id-ID", # Menyamakan regional seolah dari Indonesia
+    #             timezone_id="Asia/Jakarta"
+    #         )
             
-            # Semaphore 1: Membatasi maksimal 2 situs yang berjalan PARALEL dalam satu waktu
-            site_semaphore = asyncio.Semaphore(2)
+    #         # Semaphore 1: Membatasi maksimal 2 situs yang berjalan PARALEL dalam satu waktu
+    #         site_semaphore = asyncio.Semaphore(2)
             
-            # Semaphore 2: Membatasi max 5 tab artikel terbuka bersamaan di internal seluruh situs
-            tab_semaphore = asyncio.Semaphore(5)
+    #         # Semaphore 2: Membatasi max 5 tab artikel terbuka bersamaan di internal seluruh situs
+    #         tab_semaphore = asyncio.Semaphore(5)
             
-            # Fungsi pembungkus (wrapper) untuk menerapkan limitasi site_semaphore
-            async def scrape_with_limit(site):
-                async with site_semaphore:
-                    await scrape_single_site(site, context, tab_semaphore, master_file_name)
+    #         # Fungsi pembungkus (wrapper) untuk menerapkan limitasi site_semaphore
+    #         async def scrape_with_limit(site):
+    #             async with site_semaphore:
+    #                 await scrape_single_site(site, context, tab_semaphore, master_file_name)
             
-            # Membuat list coroutine/tasks menggunakan fungsi pembungkus baru
-            site_tasks = [
-                scrape_with_limit(site) 
-                for site in WEBSITES
-            ]
+    #         # Membuat list coroutine/tasks menggunakan fungsi pembungkus baru
+    #         site_tasks = [
+    #             scrape_with_limit(site) 
+    #             for site in WEBSITES
+    #         ]
             
-            print(f"[-] Menjalankan scraping untuk {len(WEBSITES)} situs dengan sistem antrean (Maks 2 situs paralel)...")
-            # Memicu eksekusi paralel yang sudah dibatasi
-            await asyncio.gather(*site_tasks)
+    #         print(f"[-] Menjalankan scraping untuk {len(WEBSITES)} situs dengan sistem antrean (Maks 2 situs paralel)...")
+    #         # Memicu eksekusi paralel yang sudah dibatasi
+    #         await asyncio.gather(*site_tasks)
             
-            await browser.close()
+    #         await browser.close()
 
-    # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
+    # # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
 
 if __name__ == "__main__":
     asyncio.run(main())
