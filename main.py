@@ -22,17 +22,41 @@ from firecrawl import Firecrawl
 # Memuat variabel dari file .env
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WEB_APP_SCRIPT_URL = os.getenv("WEB_APP_SCRIPT_URL")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+# Muat ketiga API Key
+GEMINI_API_KEY_1 = os.getenv("GEMINI_API_KEY_1")
+GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
+GEMINI_API_KEY_3 = os.getenv("GEMINI_API_KEY_3")
 
-# Inisialisasi Klien Gemini
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Masukkan ke dalam list dan abaikan yang kosong (jika sewaktu-waktu Anda hanya pakai 2 key)
+api_keys = [k for k in [GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3] if k]
+
+if not api_keys:
+    raise ValueError("Tidak ada GEMINI_API_KEY yang ditemukan di dalam file .env!")
+
+# Inisialisasi multiple client untuk setiap API Key
+clients = [genai.Client(api_key=key) for key in api_keys]
+
+# Class untuk merotasi pemakaian client (Round-Robin) secara aman (thread-safe)
+class ClientRotator:
+    def __init__(self, clients_list):
+        self.clients = clients_list
+        self.index = 0
+        self.lock = asyncio.Lock()
+
+    async def get_client(self):
+        async with self.lock:
+            c = self.clients[self.index]
+            self.index = (self.index + 1) % len(self.clients)
+            return c
+
+client_rotator = ClientRotator(clients)
 
 # =====================================================================
-# SYSTEM SMART RATE LIMITER (MAKSIMAL 12 REQUEST PER 1 MENIT 10 DETIK)
+# SYSTEM SMART RATE LIMITER
 # =====================================================================
 class SmartRateLimiter:
     def __init__(self, max_requests=12, window_seconds=70):
@@ -62,8 +86,10 @@ class SmartRateLimiter:
                 # Jika hitungan terlalu mepet/negatif, beri jeda paksa 1 detik sebelum cek ulang
                 await asyncio.sleep(2)
 
-# Inisialisasi limiter global (Maksimal 12 request per 70 detik)
-gemini_limiter = SmartRateLimiter(max_requests=12, window_seconds=70)
+# Inisialisasi limiter global (Otomatis menyesuaikan jumlah API Key: misal 3 key x 12 = 36 req/70s)
+kapasitas_maksimal = 12 * len(api_keys)
+gemini_limiter = SmartRateLimiter(max_requests=kapasitas_maksimal, window_seconds=70)
+print(f"[*] Sistem Rate Limiter diatur ke {gemini_limiter.max_requests} request per {gemini_limiter.window_seconds} detik.")
 
 # ==========================================
 # AMBIL DATA DINAMIS DARI GOOGLE APPS SCRIPT
@@ -101,34 +127,36 @@ async def filter_links_with_gemini(prompt, csv_string):
     await gemini_limiter.acquire()
 
     print("    [-] Kuota terverifikasi. Mengirim request filter link ke Gemini...")
-    await asyncio.sleep(random.uniform(0.1, 0.5)) 
     
-    models_fallback_order = ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
+    models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
     data_csv_mentah = csv_string.encode('utf-8')
     
+    current_client = await client_rotator.get_client() # Ambil giliran client
+    
     for model_name in models_fallback_order:
-        def send_request():
-            try:
-                print(f"    [-] Mencoba memfilter link menggunakan model: {model_name}...")
-                komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
-                generate_content_config = types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
-                )
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[komponen_csv, prompt],
-                    config=generate_content_config
-                )
-                return response.text if response and response.text else ""
-            except Exception as e:
-                print(f"    [!] Model {model_name} Error: {e}")
-                return None
-
-        result = await asyncio.to_thread(send_request)
-        if result is not None:
-            return result
+        await gemini_limiter.acquire()
+        
+        try:
+            print(f"    [-] Mencoba memfilter konten berita menggunakan model Async: {model_name}...")
+            komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+            generate_content_config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
+            )
             
-    print("    [!] Semua model untuk Filter Link gagal merespons.")
+            # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
+            response = await current_client.aio.models.generate_content(
+                model=model_name,
+                contents=[komponen_csv, prompt],
+                config=generate_content_config
+            )
+            
+            if response and response.text:
+                return response.text
+                
+        except Exception as e:
+            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
+
+    print("    [!] Semua model untuk Ekstraksi Konten gagal merespons pada API Key ini.")
     return ""
 
 # ==========================================
@@ -138,34 +166,36 @@ async def extract_content_with_gemini(prompt, csv_string):
     await gemini_limiter.acquire()
 
     print("    [-] Kuota terverifikasi. Mengirim request filter konten berita ke Gemini...")
-    await asyncio.sleep(random.uniform(0.1, 0.5)) 
     
-    models_fallback_order = ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
+    models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
     data_csv_mentah = csv_string.encode('utf-8')
     
-    for model_name in models_fallback_order:
-        def send_request():
-            try:
-                print(f"    [-] Mencoba memfilter konten berita menggunakan model: {model_name}...")
-                komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
-                generate_content_config = types.GenerateContentConfig(
-                    thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
-                )
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[komponen_csv, prompt],
-                    config=generate_content_config
-                )
-                return response.text if response and response.text else ""
-            except Exception as e:
-                print(f"    [!] Model {model_name} Error: {e}")
-                return None
+    current_client = await client_rotator.get_client() # Ambil giliran client
 
-        result = await asyncio.to_thread(send_request)
-        if result is not None:
-            return result
+    for model_name in models_fallback_order:
+        await gemini_limiter.acquire()
+        
+        try:
+            print(f"    [-] Mencoba memfilter konten berita menggunakan model Async: {model_name}...")
+            komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+            generate_content_config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
+            )
             
-    print("    [!] Semua model untuk Ekstraksi Konten gagal merespons.")
+            # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
+            response = await current_client.aio.models.generate_content(
+                model=model_name,
+                contents=[komponen_csv, prompt],
+                config=generate_content_config
+            )
+            
+            if response and response.text:
+                return response.text
+                
+        except Exception as e:
+            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
+
+    print("    [!] Semua model untuk Ekstraksi Konten gagal merespons pada API Key ini.")
     return ""
 
 # ==========================================
@@ -177,25 +207,28 @@ async def ask_gemini_with_inline_csv(prompt, csv_string):
     models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
     data_csv_mentah = csv_string.encode('utf-8')
 
+    current_client = await client_rotator.get_client() # Ambil giliran client
+    
     for model_name in models_fallback_order:
-        def send_request():
-            try:
-                print(f"    [-] Mencoba menganalisis data menggunakan model: {model_name}...")
-                komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[komponen_csv, prompt]
-                )
-                return response.text if response and response.text else ""
-            except Exception as e:
-                print(f"    [!] Model {model_name} Error: {e}")
-                return None
+        await gemini_limiter.acquire()
+        
+        try:
+            print(f"    [-] Mencoba menganalisis data menggunakan model Async: {model_name}...")
+            komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+            
+            # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
+            response = await current_client.aio.models.generate_content(
+                model=model_name,
+                contents=[komponen_csv, prompt]
+            )
+            
+            if response and response.text:
+                return response.text
+                
+        except Exception as e:
+            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
 
-        result = await asyncio.to_thread(send_request)
-        if result is not None:
-            return result
-
-    print("    [!] Semua model untuk Analisis Data gagal merespons.")
+    print("    [!] Semua model untuk Analisis Data gagal merespons pada API Key ini.")
     return ""
 
 # ==========================================
@@ -610,26 +643,25 @@ def send_telegram_message(text):
 # FUNGSI PEMBANTU BROWSER
 # ==========================================
 async def auto_scroll(page, max_scroll_steps=15):
-    await page.evaluate("""
-        async (maxSteps) => {
-            await new Promise((resolve) => {
-                var totalHeight = 0;
-                var distance = 200;
-                var steps = 0;
-                var timer = setInterval(() => {
-                    var scrollHeight = document.body.scrollHeight;
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    steps += 1;
-                    if(totalHeight >= scrollHeight - window.innerHeight || steps >= maxSteps){
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 150);
-            });
-        }
-    """, max_scroll_steps)
-    await page.wait_for_timeout(1500)
+    """Scroll menggunakan Native Mouse Wheel Playwright"""
+    print("    [-] Melakukan scrolling (Native Mouse Wheel)...")
+    try:
+        # Arahkan kursor mouse ke tengah layar agar aman dari sisi pinggir/iframe iklan
+        viewport_size = page.viewport_size
+        if viewport_size:
+            await page.mouse.move(viewport_size['width'] / 2, viewport_size['height'] / 2)
+        
+        for step in range(max_scroll_steps):
+            # Scroll roda mouse ke bawah sejauh 600 pixel
+            await page.mouse.wheel(delta_x=0, delta_y=600)
+            
+            # Beri jeda 0.3 - 0.5 detik per guliran agar website sempat memuat gambar/XHR (Lazy Load)
+            await asyncio.sleep(0.4)
+            
+    except Exception as e:
+        print(f"    [!] Peringatan saat scrolling: {e}")
+        
+    await asyncio.sleep(1) # Jeda final sebelum lanjut
 
 async def handle_infinite_scroll(page, scroll_count):
     for _ in range(scroll_count):
@@ -653,52 +685,39 @@ async def handle_rss_feed(page, rss_url):
     """
     Mengambil tautan dari RSS feed menggunakan Playwright untuk menghindari HTTP Error 403 (Forbidden)
     """
-    links = []
     try:
-        print(f"    [-] Mengunduh XML RSS via Browser: {rss_url}")
+        # Menggunakan API request bawaan Playwright untuk mengambil data mentah
+        response = await page.request.get(rss_url)
         
-        # Menggunakan wait_until="commit" agar proses instan begitu data XML masuk ke browser
-        await page.goto(rss_url, wait_until="commit", timeout=20000)
-        
-        # Berikan jeda super singkat agar data XML terserap penuh di memory page
-        await page.wait_for_timeout(1000)
-        
-        # Ambil teks mentah XML dari halaman
-        xml_text = await page.content()
-        
-        # Bersihkan string XML jika Playwright membungkusnya dalam tag HTML bawaan browser (<pre> atau <html>)
-        if "<pre" in xml_text:
-            match = re.search(r'<pre[^>]*>(.*?)</pre>', xml_text, re.DOTALL)
-            if match:
-                xml_text = match.group(1)
-        
-        # Decode entitas HTML standar jika ada yang terkonversi oleh browser
-        xml_text = xml_text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").strip()
-        
-        # Cari tag <link> di dalam elemen <item> menggunakan regex agar lebih fleksibel 
-        # jika struktur XML sedikit rusak saat dibaca via page.content()
-        item_contents = re.findall(r'<item>(.*?)</item>', xml_text, re.DOTALL)
-        for item in item_contents:
-            link_match = re.search(r'<link>(.*?)</link>', item, re.DOTALL)
-            if link_match:
-                clean_url = link_match.group(1).strip()
-                # Singkirkan CDATA jika ada (misal: <![CDATA[https://...]])
-                clean_url = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', clean_url)
-                if clean_url.startswith("http"):
-                    links.append(clean_url)
+        if response.status == 200:
+            # Ambil data teks XML asli dari RSS
+            xml_content = await response.text()
+            
+            # Parsing string XML menggunakan ElementTree bawaan Python
+            root = ET.fromstring(xml_content)
+            
+            # Ambil string LINK murni (bukan berbentuk dictionary)
+            daftar_berita = []
+            for item in root.findall(".//item"):
+                link = item.find("link").text if item.find("link") is not None else ""
+                if link:
+                    # PERBAIKAN: Masukkan string link murni langsung, jangan dibungkus dict {}
+                    daftar_berita.append(link.strip())
                     
-        return links # <-- POSISI REKOMENDASI: Mengembalikan data langsung saat proses SUKSES
-
+            print(f"[+] Berhasil mengambil {len(daftar_berita)} berita dari RSS.")
+            return daftar_berita
+        else:
+            print(f"[!] Gagal mengambil RSS. HTTP Status: {response.status}")
+            return []
+            
     except Exception as e:
-        print(f"    [!] Gagal memproses RSS via Browser: {e}")
-        return [] # <-- POSISI REKOMENDASI: Mengembalikan list kosong saat proses GAGAL
+        print(f"[!] Terjadi kesalahan saat membaca RSS: {e}")
+        return []
 
-async def fetch_article_data(context, url, semaphore, selector_extract=None, max_scroll_steps=15):
+async def fetch_article_data(context, url, semaphore, selector_extract=None, max_scroll_steps=5):
     async with semaphore:
         page = await context.new_page()
         try:
-            # Memberikan jeda acak antara 1 sampai 3 detik sebelum memuat halaman
-            await asyncio.sleep(random.uniform(1.0, 3.0))
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await auto_scroll(page, max_scroll_steps=max_scroll_steps)
@@ -708,7 +727,7 @@ async def fetch_article_data(context, url, semaphore, selector_extract=None, max
             if selector_extract:
                 try:
                     # Ambil berdasarkan selector spesifik terlebih dahulu
-                    inner_text = await page.locator(selector_extract).innerText()
+                    inner_text = await page.locator(selector_extract).first.inner_text()
                 except Exception as selector_err:
                     # Jika selector gagal/tidak ditemukan, ambil seluruh isi body text
                     print(f"    [!] Selector '{selector_extract}' gagal pada {url} ({selector_err}). Menggunakan fallback seluruh teks...")
@@ -817,10 +836,8 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             
             try:
                 # Set timeout 30 detik untuk goto, wait_until cukup "load" saja
-                await page.goto(site['url'], wait_until="load", timeout=30000)
+                await page.goto(site['url'], wait_until="domcontentloaded", timeout=30000)
                 
-                # Coba tunggu jaringan sepi selama maks 5 detik
-                await page.wait_for_load_state("networkidle", timeout=5000)
             except (asyncio.TimeoutError, PlaywrightTimeoutError):
                 # Jika timeout 5 detik di atas habis, jangan anggap ini error fatal.
                 # Cetak informasi ini dan biarkan skrip lanjut ke auto_scroll bawah.
@@ -858,12 +875,10 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 # Set timeout 30 detik untuk goto, wait_until cukup "load" saja
                 await page.goto(site['url'], wait_until="load", timeout=30000)
                 
-                # Coba tunggu jaringan sepi selama maks 5 detik
-                await page.wait_for_load_state("networkidle", timeout=5000)
             except (asyncio.TimeoutError, PlaywrightTimeoutError):
                 # Jika timeout 5 detik di atas habis, jangan anggap ini error fatal.
                 # Cetak informasi ini dan biarkan skrip lanjut ke auto_scroll bawah.
-                print(f"    [-] Jaringan tidak sepenuhnya idle dalam 5 detik (banyak iklan/tracker), mengabaikan dan lanjut...")
+                print(f"    [-] Gagal menunggu load selama 30 detik, mengabaikan dan lanjut...")
             except Exception as e:
                 print(f"    [!] Ada kendala lain saat memuat halaman: {e}")
 
@@ -894,13 +909,6 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                         # --- MODIFIKASI: Memaksa halaman kembali ke posisi paling atas ---
                         await page.evaluate("window.scrollTo(0, 0);")
                         await page.wait_for_timeout(1000) # Jeda stabilisasi posisi atas
-
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=5000)
-                        except (asyncio.TimeoutError, PlaywrightTimeoutError):
-                            print(f"    [-] Jaringan tidak idle dalam 5 detik untuk {site['name']}, melanjutkan...")
-                        except Exception:
-                            pass
 
                         await auto_scroll(page, max_scroll_steps=10)
                         
@@ -933,18 +941,9 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 try:
                     # 1. Gunakan wait_until="load" dengan timeout eksplisit (misal 20 detik)
                     # Ini mencegah skrip menggantung terlalu lama di satu halaman yang rusak
-                    await page.goto(target_url, wait_until="load", timeout=30000)
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
 
-                    # 2. Tunggu sebentar untuk networkidle, jika timeout (karena iklan), abaikan saja
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except (asyncio.TimeoutError, PlaywrightTimeoutError):
-                        # Hanya log biasa, bukan error fatal
-                        print(f"    [-] Jaringan halaman {page_num} tidak idle sepenuhnya (iklan aktif), lanjut scroll...")
-                    except Exception:
-                        pass
-
-                    # 3. Lakukan scroll dan ambil data jika halaman berhasil terbuka
+                    # 2. Lakukan scroll dan ambil data jika halaman berhasil terbuka
                     await auto_scroll(page, max_scroll_steps=10)
                     raw_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
                     all_raw_links.extend(raw_links)
@@ -1177,25 +1176,27 @@ async def main():
         async with async_playwright() as p:
             # Mengaktifkan headless=True agar berjalan mulus tanpa antarmuka GUI di GitHub Actions
             browser = await p.chromium.launch(
-            headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled', # Menyembunyikan status navigator.webdriver
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox'
-                ]
+                headless=True
             )
 
             # Berikan User-Agent manusia asli agar tidak dicurigai
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720}
+            )
+
+            # ==============================================================
+            # Memblokir Pemuatan Gambar, CSS, dan Font di Playwright
+            # ==============================================================
+            await context.route("**/*", lambda route: route.abort() 
+                if route.request.resource_type in ["image", "stylesheet", "media", "font"] 
+                else route.continue_()
             )
             
-            # Semaphore 1: Membatasi maksimal 2 situs yang berjalan PARALEL dalam satu waktu
-            site_semaphore = asyncio.Semaphore(2)
+            # Semaphore 1: Membatasi maksimal 3 situs yang berjalan PARALEL dalam satu waktu
+            site_semaphore = asyncio.Semaphore(3)
             
             # Semaphore 2: Membatasi max 5 tab artikel terbuka bersamaan di internal seluruh situs
-            tab_semaphore = asyncio.Semaphore(5)
+            tab_semaphore = asyncio.Semaphore(10)
             
             # Fungsi pembungkus (wrapper) untuk menerapkan limitasi site_semaphore
             async def scrape_with_limit(site):
@@ -1208,7 +1209,7 @@ async def main():
                 for site in WEBSITES
             ]
             
-            print(f"[-] Menjalankan scraping untuk {len(WEBSITES)} situs dengan sistem antrean (Maks 2 situs paralel)...")
+            print(f"[-] Menjalankan scraping untuk {len(WEBSITES)} situs dengan sistem antrean (Maks 3 situs paralel)...")
             # Memicu eksekusi paralel yang sudah dibatasi
             await asyncio.gather(*site_tasks)
             
