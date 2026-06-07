@@ -49,5 +49,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WEB_APP_SCRIPT_URL: ${{ secrets.WEB_APP_SCRIPT_URL }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+        timeout-minutes: 90 # <-- HANYA MEMBATASI PROSES RUN PYTHON INI MAKSIMAL 1 JAM
         run: |
           python main.py
