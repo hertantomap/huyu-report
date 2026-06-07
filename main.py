@@ -11,15 +11,10 @@ headers = {
     "Origin": "https://www.idx.co.id"
 }
 
-try:
-    # Menggunakan impersonate='chrome' untuk meniru TLS fingerprint browser Chrome asli
-    proxies = {
-        'http': 'socks5://127.0.0.1:9050',
-        'https': 'socks5://127.0.0.1:9050'
-    }
+try: 
 
     # Jika menggunakan requests biasa (butuh pip install requests[socks])
-    response = requests.get(url, headers=headers, impersonate="chrome110", proxies=proxies)
+    response = requests.get(url, headers=headers, impersonate="chrome110")
     
     if response.status_code == 200:
         data = response.json()
