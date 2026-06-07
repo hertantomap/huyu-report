@@ -42,42 +42,53 @@ jobs:
         run: |
           playwright install-deps chromium
 
-      # --- PERBAIKAN OTOMATIS: DOWNLOAD OVPN INDONESIA DENGAN STRATEGI CADANGAN ---
+      #--- PERBAIKAN 1: DOWNLOAD OVPN DENGAN PROTOKOL RELEVAN ---
       - name: Download Latest Indonesia OVPN Profile
         run: |
           sudo apt-get update && sudo apt-get install -y openvpn curl dos2unix
-          
-          printenv
           echo "[-] Mengambil list VPN harian dari VPNGate..."
-          # Download list API dan bersihkan format baris Windows ke Linux (\r\n ke \n)
           curl -sL http://www.vpngate.net/api/iphone/ | dos2unix > vpngate_list.txt
           
-          # Cari baris yang mengandung negara Indonesia (ID). 
-          # Kita ambil opsi ke-2 atau ke-3 jika opsi pertama mati.
+          # Cari server Indonesia (ID). Kita bersihkan baris agar formatnya sempurna.
           if grep -q ",ID," vpngate_list.txt; then
-            # Mengambil server Indonesia baris pertama yang valid, ambil kolom ke-15 (Base64), lalu decode
             grep ",ID," vpngate_list.txt | head -n 1 | cut -d, -f15 | base64 -d > id-config.ovpn
             echo "[+] Berhasil mengunduh server Utama Indonesia."
           else
-            echo "[!] Tidak ditemukan server Indonesia di daftar utama. Mencoba server Asia terdekat (SG)..."
+            echo "[!] Server Indonesia kosong, beralih ke Singapura (SG)..."
             grep ",SG," vpngate_list.txt | head -n 1 | cut -d, -f15 | base64 -d > id-config.ovpn
           fi
         continue-on-error: true
   
-      # --- MENJALANKAN OPENVPN DENGAN LOG FILTER UNTUK DEBUGGING ---
-      - name: Connect to Indonesia VPN
+      # --- PERBAIKAN 2: FORCE CREATE TUN DEVICE & START OPENVPN ---
+      - name: Connect to Indonesia VPN (With TUN Fix)
         run: |
-          # Jalankan openvpn dengan bypass cert check jika server gratisan memiliki cert expired
-          sudo openvpn --config id-config.ovpn --status vpn-status.log --daemon
+          # Membuat TUN device secara manual karena GitHub Actions membatasinya secara default
+          sudo mkdir -p /dev/net
+          if [ ! -c /dev/net/tun ]; then
+            sudo mknod /dev/net/tun c 10 200
+            sudo chmod 600 /dev/net/tun
+          fi
+  
+          # Modifikasi file .ovpn agar mengabaikan kesalahan sertifikat bawaan & otomatis redirect-gateway
+          echo "auth-user-pass /dev/null" >> id-config.ovpn
+          echo "redirect-gateway def1" >> id-config.ovpn
+          echo "cipher AES-128-CBC" >> id-config.ovpn
           
-          echo "[-] Menunggu 15 detik agar jabat tangan (handshake) VPN selesai..."
-          sleep 15
+          # Jalankan OpenVPN secara background (--daemon) dan catat lognya
+          sudo openvpn --config id-config.ovpn --log vpn-execution.log --status vpn-status.log --daemon
           
+          echo "[-] Menunggu 20 detik agar VPN melakukan jabat tangan (handshake) sempurna..."
+          sleep 20
+          
+          # Cetak log VPN untuk melihat apakah ada error AUTH, TLS, atau Connected
+          echo "=== LOG EKSEKUSI OPENVPN ==="
+          cat vpn-execution.log || true
+          echo "============================"
+  
           echo "[-] Memeriksa status IP publik baru setelah VPN menyala:"
-          # Cek IP. Jika VPN berhasil, IP akan berubah ke Indonesia/Singapura.
-          # Ditambahkan timeout 10 detik agar jika VPN macet, GitHub Actions tidak stuck selamanya.
-          curl --max-time 10 https://ifconfig.me || echo "[!] Gagal memuat IP, mencoba alternatif..."
-          curl --max-time 10 https://api.ipify.org || echo "[!] VPN tidak memberikan akses internet."
+          # Gunakan parameter --interface jika ingin memastikan rute dilempar ke tun0
+          curl --max-time 15 https://ifconfig.me || echo "[!] Gagal memuat IP dari server utama."
+          curl --max-time 15 https://api.ipify.org || echo "[!] VPN tidak merespon akses internet."
         continue-on-error: true
 
       - name: Run Scraper Script
