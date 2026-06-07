@@ -42,6 +42,24 @@ jobs:
         run: |
           playwright install-deps chromium
 
+      # --- OTOMATIS CARI & DOWNLOAD OVPN INDONESIA YANG AKTIF ---
+      - name: Download Latest Indonesia OVPN Profile
+        run: |
+          sudo apt-get update && sudo apt-get install -y openvpn curl
+          # Mengambil daftar server dari API VPNGate, memfilter negara Indonesia (ID), 
+          # mengambil server teratas (paling stabil), dekode dari Base64, lalu simpan jadi id-config.ovpn
+          curl -s http://www.vpngate.net/api/iphone/ | grep -m 1 ",ID," | cut -d, -f15 | base64 -d > id-config.ovpn
+          echo "[+] Berhasil mengunduh config OVPN Indonesia terbaru harian."
+        continue-on-error: true
+
+      # --- JALANKAN OPENVPN DI LATAR BELAKANG ---
+      - name: Connect to Indonesia VPN
+        run: |
+          sudo openvpn --config id-config.ovpn --daemon
+          echo "[-] Menunggu 10 detik agar koneksi VPN terbentuk..."
+          sleep 10
+        continue-on-error: true
+
       - name: Run Scraper Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
