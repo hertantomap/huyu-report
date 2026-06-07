@@ -220,16 +220,21 @@ async def saham_lq45_terbaik_idx():
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                '--disable-blink-features=AutomationControlled', # Menyembunyikan status navigator.webdriver
+                '--disable-blink-features=AutomationControlled', # Menyembunyikan jejak otomatisasi webdriver
                 '--no-sandbox',
-                '--disable-setuid-sandbox'
+                '--disable-setuid-sandbox',
+                '--disable-infobars',
+                '--window-position=0,0',
+                '--ignore-certificate-errors',
+                '--ignore-certificate-errors-spki-list',
             ]
         )
 
-        # Berikan User-Agent manusia asli agar tidak dicurigai
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 720}
+            viewport={"width": 1280, "height": 720},
+            locale="id-ID", # Menyamakan regional seolah dari Indonesia
+            timezone_id="Asia/Jakarta"
         )
         page = await context.new_page()
         
@@ -1192,18 +1197,23 @@ async def main():
         async with async_playwright() as p:
             # Mengaktifkan headless=True agar berjalan mulus tanpa antarmuka GUI di GitHub Actions
             browser = await p.chromium.launch(
-            headless=True,
+                headless=True,
                 args=[
-                    '--disable-blink-features=AutomationControlled', # Menyembunyikan status navigator.webdriver
+                    '--disable-blink-features=AutomationControlled', # Menyembunyikan jejak otomatisasi webdriver
                     '--no-sandbox',
-                    '--disable-setuid-sandbox'
+                    '--disable-setuid-sandbox',
+                    '--disable-infobars',
+                    '--window-position=0,0',
+                    '--ignore-certificate-errors',
+                    '--ignore-certificate-errors-spki-list',
                 ]
             )
 
-            # Berikan User-Agent manusia asli agar tidak dicurigai
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720}
+                viewport={"width": 1280, "height": 720},
+                locale="id-ID", # Menyamakan regional seolah dari Indonesia
+                timezone_id="Asia/Jakarta"
             )
             
             # Semaphore 1: Membatasi maksimal 2 situs yang berjalan PARALEL dalam satu waktu
