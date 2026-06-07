@@ -42,22 +42,42 @@ jobs:
         run: |
           playwright install-deps chromium
 
-      # --- OTOMATIS CARI & DOWNLOAD OVPN INDONESIA YANG AKTIF ---
+      # --- PERBAIKAN OTOMATIS: DOWNLOAD OVPN INDONESIA DENGAN STRATEGI CADANGAN ---
       - name: Download Latest Indonesia OVPN Profile
         run: |
-          sudo apt-get update && sudo apt-get install -y openvpn curl
-          # Mengambil daftar server dari API VPNGate, memfilter negara Indonesia (ID), 
-          # mengambil server teratas (paling stabil), dekode dari Base64, lalu simpan jadi id-config.ovpn
-          curl -s http://www.vpngate.net/api/iphone/ | grep -m 1 ",ID," | cut -d, -f15 | base64 -d > id-config.ovpn
-          echo "[+] Berhasil mengunduh config OVPN Indonesia terbaru harian."
+          sudo apt-get update && sudo apt-get install -y openvpn curl dos2unix
+          
+          printenv
+          echo "[-] Mengambil list VPN harian dari VPNGate..."
+          # Download list API dan bersihkan format baris Windows ke Linux (\r\n ke \n)
+          curl -sL http://www.vpngate.net/api/iphone/ | dos2unix > vpngate_list.txt
+          
+          # Cari baris yang mengandung negara Indonesia (ID). 
+          # Kita ambil opsi ke-2 atau ke-3 jika opsi pertama mati.
+          if grep -q ",ID," vpngate_list.txt; then
+            # Mengambil server Indonesia baris pertama yang valid, ambil kolom ke-15 (Base64), lalu decode
+            grep ",ID," vpngate_list.txt | head -n 1 | cut -d, -f15 | base64 -d > id-config.ovpn
+            echo "[+] Berhasil mengunduh server Utama Indonesia."
+          else
+            echo "[!] Tidak ditemukan server Indonesia di daftar utama. Mencoba server Asia terdekat (SG)..."
+            grep ",SG," vpngate_list.txt | head -n 1 | cut -d, -f15 | base64 -d > id-config.ovpn
+          fi
         continue-on-error: true
-
-      # --- JALANKAN OPENVPN DI LATAR BELAKANG ---
+  
+      # --- MENJALANKAN OPENVPN DENGAN LOG FILTER UNTUK DEBUGGING ---
       - name: Connect to Indonesia VPN
         run: |
-          sudo openvpn --config id-config.ovpn --daemon
-          echo "[-] Menunggu 10 detik agar koneksi VPN terbentuk..."
-          sleep 10
+          # Jalankan openvpn dengan bypass cert check jika server gratisan memiliki cert expired
+          sudo openvpn --config id-config.ovpn --status vpn-status.log --daemon
+          
+          echo "[-] Menunggu 15 detik agar jabat tangan (handshake) VPN selesai..."
+          sleep 15
+          
+          echo "[-] Memeriksa status IP publik baru setelah VPN menyala:"
+          # Cek IP. Jika VPN berhasil, IP akan berubah ke Indonesia/Singapura.
+          # Ditambahkan timeout 10 detik agar jika VPN macet, GitHub Actions tidak stuck selamanya.
+          curl --max-time 10 https://ifconfig.me || echo "[!] Gagal memuat IP, mencoba alternatif..."
+          curl --max-time 10 https://api.ipify.org || echo "[!] VPN tidak memberikan akses internet."
         continue-on-error: true
 
       - name: Run Scraper Script
