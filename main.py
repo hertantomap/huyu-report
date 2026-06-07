@@ -214,6 +214,8 @@ async def saham_lq45_terbaik_idx():
         "UNTR", "UNVR", "WIFI"
     }
     
+    data_saham = []
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -229,17 +231,15 @@ async def saham_lq45_terbaik_idx():
             ]
         )
 
-        page = await context.new_page()
-        
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 768},
             locale="id-ID", # Menyamakan regional seolah dari Indonesia
             timezone_id="Asia/Jakarta"
         )
+        page = await context.new_page()
         
         target_url = "https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=1000&start=0"
-        data_saham = []
         
         try:
             try:
