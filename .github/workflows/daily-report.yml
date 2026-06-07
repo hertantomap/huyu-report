@@ -42,55 +42,6 @@ jobs:
         run: |
           playwright install-deps chromium
 
-      #--- PERBAIKAN 1: DOWNLOAD OVPN DENGAN PROTOKOL RELEVAN ---
-      - name: Download Latest Indonesia OVPN Profile
-        run: |
-          sudo apt-get update && sudo apt-get install -y openvpn curl dos2unix
-          echo "[-] Mengambil list VPN harian dari VPNGate..."
-          curl -sL http://www.vpngate.net/api/iphone/ | dos2unix > vpngate_list.txt
-          
-          # Cari server Indonesia (ID). Kita bersihkan baris agar formatnya sempurna.
-          if grep -q ",ID," vpngate_list.txt; then
-            grep ",ID," vpngate_list.txt | head -n 1 | cut -d, -f15 | base64 -d > id-config.ovpn
-            echo "[+] Berhasil mengunduh server Utama Indonesia."
-          else
-            echo "[!] Server Indonesia kosong, beralih ke Singapura (SG)..."
-            grep ",SG," vpngate_list.txt | head -n 1 | cut -d, -f15 | base64 -d > id-config.ovpn
-          fi
-        continue-on-error: true
-  
-      # --- PERBAIKAN 2: FORCE CREATE TUN DEVICE & START OPENVPN ---
-      - name: Connect to Indonesia VPN (With TUN Fix)
-        run: |
-          # Membuat TUN device secara manual karena GitHub Actions membatasinya secara default
-          sudo mkdir -p /dev/net
-          if [ ! -c /dev/net/tun ]; then
-            sudo mknod /dev/net/tun c 10 200
-            sudo chmod 600 /dev/net/tun
-          fi
-  
-          # Modifikasi file .ovpn agar mengabaikan kesalahan sertifikat bawaan & otomatis redirect-gateway
-          echo "auth-user-pass /dev/null" >> id-config.ovpn
-          echo "redirect-gateway def1" >> id-config.ovpn
-          echo "cipher AES-128-CBC" >> id-config.ovpn
-          
-          # Jalankan OpenVPN secara background (--daemon) dan catat lognya
-          sudo openvpn --config id-config.ovpn --log vpn-execution.log --status vpn-status.log --daemon
-          
-          echo "[-] Menunggu 20 detik agar VPN melakukan jabat tangan (handshake) sempurna..."
-          sleep 20
-          
-          # Cetak log VPN untuk melihat apakah ada error AUTH, TLS, atau Connected
-          echo "=== LOG EKSEKUSI OPENVPN ==="
-          cat vpn-execution.log || true
-          echo "============================"
-  
-          echo "[-] Memeriksa status IP publik baru setelah VPN menyala:"
-          # Gunakan parameter --interface jika ingin memastikan rute dilempar ke tun0
-          curl --max-time 15 https://ifconfig.me || echo "[!] Gagal memuat IP dari server utama."
-          curl --max-time 15 https://api.ipify.org || echo "[!] VPN tidak merespon akses internet."
-        continue-on-error: true
-
       - name: Run Scraper Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
