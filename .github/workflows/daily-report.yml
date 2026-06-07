@@ -42,22 +42,12 @@ jobs:
         run: |
           playwright install-deps chromium
           
-      - name: Install Dependencies
-        run: pip install curl_cffi
-        
-      - name: Install and Start Tor
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor
-          sudo service tor start
-          # Tunggu sampai Tor benar-benar aktif
-          sleep 10
-
       - name: Run Scraper Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WEB_APP_SCRIPT_URL: ${{ secrets.WEB_APP_SCRIPT_URL }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
         run: |
-          torsocks python main.py
+          python main.py
