@@ -42,6 +42,14 @@ jobs:
         run: |
           playwright install-deps chromium
 
+      - name: Install and Start Tor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo service tor start
+          # Tunggu sampai Tor benar-benar aktif
+          sleep 10
+
       - name: Run Scraper Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
