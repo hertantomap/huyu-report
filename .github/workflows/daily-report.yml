@@ -41,7 +41,10 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: |
           playwright install-deps chromium
-
+          
+      - name: Install Dependencies
+        run: pip install curl_cffi
+        
       - name: Install and Start Tor
         run: |
           sudo apt-get update
