@@ -56,6 +56,9 @@ class SmartRateLimiter:
             if sleep_time > 0:
                 print(f"    [!] Kuota Gemini Penuh ({self.max_requests} req / {self.window_seconds}s). Menunggu {sleep_time:.2f} detik...")
                 await asyncio.sleep(sleep_time)
+            else:
+                # Jika hitungan terlalu mepet/negatif, beri jeda paksa 1 detik sebelum cek ulang
+                await asyncio.sleep(2)
 
 # Inisialisasi limiter global (Maksimal 12 request per 70 detik)
 gemini_limiter = SmartRateLimiter(max_requests=12, window_seconds=70)
@@ -214,26 +217,44 @@ async def saham_lq45_terbaik_idx():
     data_saham = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-blink-features=AutomationControlled', # Menyembunyikan status navigator.webdriver
+                '--no-sandbox',
+                '--disable-setuid-sandbox'
+            ]
+        )
+
+        # Berikan User-Agent manusia asli agar tidak dicurigai
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
         )
         page = await context.new_page()
         
         target_url = "https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=1000&start=0"
         
         try:
-            response = await page.goto(target_url, wait_until="networkidle")
-            if response.status == 200:
-                raw_text = await page.locator("body").inner_text()
-                json_data = json.loads(raw_text)
-                data_saham = json_data.get('data', [])
-            else:
-                print(f"[!] Gagal mengambil data. Status Code: {response.status}")
-                await browser.close()
-                return None
+            try:
+                # Jalankan perintah ini TEPAT SEBELUM page.goto(target_url)
+                await page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                """)
+                await page.goto(target_url, wait_until="domcontentloaded")
+                await auto_scroll(page, max_scroll_steps=5)
+            except (asyncio.TimeoutError, PlaywrightTimeoutError):
+                # Hanya log biasa, bukan error fatal
+                print(f"    [-] Halaman https://www.idx.co.id mengalami timeout, lanjut ambil data...")
+            except Exception:
+                pass
+            raw_text = await page.locator("body").inner_text()
+            json_data = json.loads(raw_text)
+            data_saham = json_data.get('data', [])
         except Exception as e:
-            print(f"[!] Terjadi kesalahan saat membaca data: {e}")
+            print(f"[!] Terjadi kesalahan saat membaca data https://www.idx.co.id: {e}")
             await browser.close()
             return None
             
@@ -579,12 +600,8 @@ def send_telegram_message(text):
             # SEKOCI PENYELAMAT: Kirim sebagai teks biasa tanpa format jika HTML internalnya masih error
             try:
                 print("    [!] Mencoba mengirim ulang bagian ini sebagai Plain Text...")
-                # Ambil teks asli non-HTML untuk bagian ini
-                raw_lines = text.splitlines()
-                # Estimasi kasar potongan teks asli yang setara
-                raw_chunk = "\n".join(raw_lines)
-                plain_text_fallback = raw_chunk[:3500] + f"\n\n[Dikirim dalam mode teks biasa karena gangguan HTML - Bagian {i + 1}/{total_bagian}]"
-                
+                plain_chunk = re.sub(r'<[^>]*>', '', chunk)
+                plain_text_fallback = plain_chunk[:3500] + f"\n\n[Mode teks biasa - Bagian {i + 1}/{total_bagian}]"
                 payload_fallback = {
                     "chat_id": TELEGRAM_CHAT_ID,
                     "text": plain_text_fallback,
@@ -706,7 +723,7 @@ async def fetch_article_data(context, url, semaphore, selector_extract=None, max
             if selector_extract:
                 try:
                     # Ambil berdasarkan selector spesifik terlebih dahulu
-                    inner_text = await page.locator(selector_extract).first().innerText()
+                    inner_text = await page.locator(selector_extract).innerText()
                 except Exception as selector_err:
                     # Jika selector gagal/tidak ditemukan, ambil seluruh isi body text
                     print(f"    [!] Selector '{selector_extract}' gagal pada {url} ({selector_err}). Menggunakan fallback seluruh teks...")
@@ -1174,8 +1191,20 @@ async def main():
     else:
         async with async_playwright() as p:
             # Mengaktifkan headless=True agar berjalan mulus tanpa antarmuka GUI di GitHub Actions
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
+            browser = await p.chromium.launch(
+            headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled', # Menyembunyikan status navigator.webdriver
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox'
+                ]
+            )
+
+            # Berikan User-Agent manusia asli agar tidak dicurigai
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720}
+            )
             
             # Semaphore 1: Membatasi maksimal 2 situs yang berjalan PARALEL dalam satu waktu
             site_semaphore = asyncio.Semaphore(2)
