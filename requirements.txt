@@ -4,3 +4,4 @@ yfinance
 playwright
 google-genai
 firecrawl-py
+feedparser
