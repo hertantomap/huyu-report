@@ -18,6 +18,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 from google import genai
 from google.genai import types
 from firecrawl import Firecrawl
+import feedparser 
 
 # Memuat variabel dari file .env
 load_dotenv()
@@ -681,45 +682,52 @@ async def handle_load_more(page, selector, click_count):
         except:
             break
 
-async def handle_rss_feed(page, rss_url):
+async def handle_rss_feed(rss_url):
     """
-    Mengambil tautan dari RSS feed menggunakan Playwright untuk menghindari HTTP Error 403 (Forbidden)
+    Mengambil tautan dari RSS feed menggunakan Firecrawl untuk menghindari HTTP Error 
+    dan melakukan ekstraksi/parsing data XML secara andal.
     """
+    print(f"[-] Mengambil RSS feed dari URL: {rss_url} menggunakan Firecrawl...")
     try:
-        # Menggunakan API request bawaan Playwright untuk mengambil data mentah
-        response = await page.request.get(rss_url)
-        
-        if response.status == 200:
-            # Ambil data teks XML asli dari RSS
-            xml_content = await response.text()
-            
-            # Parsing string XML menggunakan ElementTree bawaan Python
-            root = ET.fromstring(xml_content)
-            
-            # Ambil string LINK murni (bukan berbentuk dictionary)
-            daftar_berita = []
-            for item in root.findall(".//item"):
-                link = item.find("link").text if item.find("link") is not None else ""
-                if link:
-                    # PERBAIKAN: Masukkan string link murni langsung, jangan dibungkus dict {}
-                    daftar_berita.append(link.strip())
-                    
-            print(f"[+] Berhasil mengambil {len(daftar_berita)} berita dari RSS.")
-            return daftar_berita
-        else:
-            print(f"[!] Gagal mengambil RSS. HTTP Status: {response.status}")
-            return []
-            
-    except Exception as e:
-        print(f"[!] Terjadi kesalahan saat membaca RSS: {e}")
-        return []
+        # Inisialisasi Firecrawl client (bisa diletakkan secara global jika sudah ada)
+        firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
+        doc = firecrawl.scrape(rss_url, formats=["html"])
+        feed = feedparser.parse(doc.html)
 
+        daftar_berita = [entry.link for entry in feed.entries]
+        # Melakukan scrape dengan format html/text mentah untuk mendapatkan konten XML
+                
+        print(f"    [+] Berhasil menemukan {len(daftar_berita)} link berita dari RSS.")
+        return daftar_berita
+
+    except Exception as e:
+        print(f"    [!] Gagal memproses RSS feed menggunakan Firecrawl: {e}")
+        return []
+    
 async def fetch_article_data(context, url, semaphore, selector_extract=None, max_scroll_steps=5):
     async with semaphore:
         page = await context.new_page()
         try:
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # === MODIFIKASI LOGIKA RETRY DENGAN STRATEGI BERBEDA ===
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    # Percobaan 1: domcontentloaded | Percobaan 2: commit
+                    strategi_tunggu = "domcontentloaded" if attempt == 0 else "commit"
+                    
+                    if attempt > 0:
+                        print(f"    [!] Percobaan pertama timeout. Mencoba kembali {url} (Percobaan {attempt + 1}/{max_retries}) dengan strategi: {strategi_tunggu}...")
+                    
+                    await page.goto(url, wait_until=strategi_tunggu, timeout=30000)
+                    break  # Berhasil memuat, keluar dari loop retry
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        # Jika percobaan kedua (terakhir) masih gagal, lempar error ke block except luar
+                        raise e
+                    await asyncio.sleep(2)  # Jeda 2 detik sebelum mencoba lagi
+            # =======================================================
+            
             await auto_scroll(page, max_scroll_steps=max_scroll_steps)
             
             # --- MEKANISME FALLBACK EKSTRAKSI TEKS ---
