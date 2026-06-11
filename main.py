@@ -125,8 +125,6 @@ async def fetch_dynamic_config(url, max_retries=3, retry_delay=5):
 # FUNGSI 1: FILTER LINK DENGAN ENGINE GEMINI
 # ==========================================
 async def filter_links_with_gemini(prompt, csv_string):
-    await gemini_limiter.acquire()
-
     print("    [-] Kuota terverifikasi. Mengirim request filter link ke Gemini...")
     
     models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
@@ -164,8 +162,6 @@ async def filter_links_with_gemini(prompt, csv_string):
 # FUNGSI 2: FILTER CONTENT BERITA DENGAN ENGINE GEMINI
 # ==========================================
 async def extract_content_with_gemini(prompt, csv_string):
-    await gemini_limiter.acquire()
-
     print("    [-] Kuota terverifikasi. Mengirim request filter konten berita ke Gemini...")
     
     models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
@@ -203,8 +199,6 @@ async def extract_content_with_gemini(prompt, csv_string):
 # FUNGSI 3: ANALISIS DATA BERITA MASTER
 # ==========================================
 async def ask_gemini_with_inline_csv(prompt, csv_string):
-    await gemini_limiter.acquire()
-    
     models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
     data_csv_mentah = csv_string.encode('utf-8')
 
@@ -836,7 +830,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
     
     try:
         if site["handling_method"] == "rss":
-            rss_links = await handle_rss_feed(page, site["url"])
+            rss_links = await handle_rss_feed(site["url"])
             urls_to_scrape = list(set(rss_links))[:int(site['max_articles'])]
         
         elif site["handling_method"] in ["infinite_scroll", "load_more_button"]:
