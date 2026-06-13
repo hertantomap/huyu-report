@@ -676,37 +676,71 @@ async def handle_load_more(page, selector, click_count):
         except:
             break
 
-async def handle_rss_feed(rss_url):
+async def handle_rss_feed(rss_url, engine="firecrawl", page=None):
     """
-    Mengambil tautan dari RSS feed menggunakan Firecrawl untuk menghindari HTTP Error 
-    dan melakukan ekstraksi/parsing data XML secara andal.
+    Mengambil tautan dari RSS feed dengan opsi engine: 'firecrawl' atau 'playwright'.
+    Jika memilih 'playwright', pastikan mengoper objek 'page' aktif ke fungsi ini.
     """
-    print(f"[-] Mengambil RSS feed dari URL: {rss_url} menggunakan Firecrawl...")
+    print(f"[-] Mengambil RSS feed dari URL: {rss_url} menggunakan {engine.upper()}...")
+    daftar_berita = []
+    raw_html_content = ""
+
     try:
-        # Inisialisasi Firecrawl client (bisa diletakkan secara global jika sudah ada)
-        firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
-        doc = firecrawl.scrape(rss_url, formats=["html"])
+        # ==========================================
+        # OPSIONIL 1: MENGGUNAKAN FIRECRAWL
+        # ==========================================
+        if engine.lower() == "firecrawl":
+            if not FIRECRAWL_API_KEY:
+                print(" [!] API Key Firecrawl tidak ditemukan. Mencoba fallback ke Playwright...")
+                engine = "playwright"
+            else:
+                firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
+                doc = firecrawl.scrape(rss_url, formats=["html"])
+                if doc and hasattr(doc, 'html') and doc.html:
+                    raw_html_content = doc.html
+                else:
+                    print(" [!] Firecrawl mengembalikan response kosong. Mencoba fallback ke Playwright...")
+                    engine = "playwright"
 
-        # Lakukan pengecekan awal jika response diblokir/kosong
-        if not doc or not hasattr(doc, 'html') or not doc.html:
-            print(" [!] Firecrawl mengembalikan response kosong.")
-            return []
-        
-        feed = feedparser.parse(doc.html)
+        # ==========================================
+        # OPSIONIL 2: MENGGUNAKAN PLAYWRIGHT (Reuse Page)
+        # ==========================================
+        if engine.lower() == "playwright":
+            if page is None:
+                print(" [!] Error: Parameter 'page' tidak disediakan untuk engine Playwright!")
+                return []
+            
+            # Gunakan page yang sudah ada, langsung arahkan ke URL RSS
+            # Menggunakan timeout 30 detik untuk mengantisipasi jaringan lambat di GitHub Actions
+            response = await page.goto(rss_url, wait_until="domcontentloaded", timeout=30000)
+            
+            if response and response.status == 200:
+                raw_html_content = await page.content()
+            else:
+                status_code = response.status if response else "Unknown"
+                print(f" [!] Playwright gagal memuat halaman RSS. HTTP Status: {status_code}")
 
-        # Tambahkan proteksi pengecekan dengan hasattr agar tidak crash
-        daftar_berita = []
-        for entry in feed.entries:
-            if hasattr(entry, 'link'):
-                daftar_berita.append(entry.link)
-            elif 'link' in entry:
-                daftar_berita.append(entry['link'])
-                
-        print(f" [+] Berhasil menemukan {len(daftar_berita)} tautan berita.")
+        # ==========================================
+        # PROSES PARSING RSS DENGAN FEEDPARSER
+        # ==========================================
+        if raw_html_content:
+            feed = feedparser.parse(raw_html_content)
+            
+            # Ekstraksi aman dengan pengecekan ketersediaan atribut 'link'
+            for entry in feed.entries:
+                if hasattr(entry, 'link'):
+                    daftar_berita.append(entry.link)
+                elif 'link' in entry:
+                    daftar_berita.append(entry['link'])
+                    
+            print(f" [+] Berhasil menemukan {len(daftar_berita)} link berita dari RSS.")
+        else:
+            print(" [!] Tidak ada konten yang berhasil diambil dari RSS feed.")
+
         return daftar_berita
 
     except Exception as e:
-        print(f"    [!] Gagal memproses RSS feed menggunakan Firecrawl: {e}")
+        print(f" [!] Gagal memproses RSS feed menggunakan {engine.upper()}: {e}")
         return []
     
 async def fetch_article_data(context, url, semaphore, selector_extract=None, max_scroll_steps=5):
@@ -841,7 +875,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
     
     try:
         if site["handling_method"] == "rss":
-            rss_links = await handle_rss_feed(site["url"])
+            rss_links = await handle_rss_feed(site["url"], site['engine_browser'], page)
             urls_to_scrape = list(set(rss_links))[:int(site['max_articles'])]
         
         elif site["handling_method"] in ["infinite_scroll", "load_more_button"]:
@@ -980,62 +1014,62 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                 urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
 
-        if not urls_to_scrape: 
-            return
+        # if not urls_to_scrape: 
+        #     return
         
-        tasks = [fetch_article_data(context, url, tab_semaphore, site.get("selector_extract"), int(site.get("max_scroll_article", 12))) for url in urls_to_scrape]
-        scraped_results = await asyncio.gather(*tasks)
-        valid_results = [res for res in scraped_results if res is not None]
+        # tasks = [fetch_article_data(context, url, tab_semaphore, site.get("selector_extract"), int(site.get("max_scroll_article", 12))) for url in urls_to_scrape]
+        # scraped_results = await asyncio.gather(*tasks)
+        # valid_results = [res for res in scraped_results if res is not None]
         
-        if not valid_results:
-            return
+        # if not valid_results:
+        #     return
         
-        memory_data_csv = io.StringIO()
-        csv_writer = csv.writer(memory_data_csv)
-        csv_writer.writerow(["URL", "RawText"])
-        for res in valid_results: 
-            csv_writer.writerow([res['url'], res['text'][:5000].replace('\n', ' ')])
+        # memory_data_csv = io.StringIO()
+        # csv_writer = csv.writer(memory_data_csv)
+        # csv_writer.writerow(["URL", "RawText"])
+        # for res in valid_results: 
+        #     csv_writer.writerow([res['url'], res['text'][:5000].replace('\n', ' ')])
         
-        final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
+        # final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
         
-        if "berita tidak sesuai dengan topik yang diinginkan" in final_extracted_data.lower():
-            return
+        # if "berita tidak sesuai dengan topik yang diinginkan" in final_extracted_data.lower():
+        #     return
 
-        if final_extracted_data.strip():
-            print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
+        # if final_extracted_data.strip():
+        #     print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
             
-            # Solusi 3: Menggunakan io.StringIO agar teks dibaca layaknya file utuh
-            f_input = io.StringIO(final_extracted_data.strip())
-            # Solusi 2: Memanfaatkan modul csv.reader resmi Python untuk parsing text
-            reader_gemini = csv.reader(f_input, delimiter=',', quotechar='"')
+        #     # Solusi 3: Menggunakan io.StringIO agar teks dibaca layaknya file utuh
+        #     f_input = io.StringIO(final_extracted_data.strip())
+        #     # Solusi 2: Memanfaatkan modul csv.reader resmi Python untuk parsing text
+        #     reader_gemini = csv.reader(f_input, delimiter=',', quotechar='"')
             
-            with open(master_file_name, 'a', newline='', encoding='utf-8') as f_append:
-                writer = csv.writer(f_append, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        #     with open(master_file_name, 'a', newline='', encoding='utf-8') as f_append:
+        #         writer = csv.writer(f_append, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
                 
-                for parsed_row in reader_gemini:
-                    if not parsed_row:
-                        continue
+        #         for parsed_row in reader_gemini:
+        #             if not parsed_row:
+        #                 continue
                     
-                    # Solusi 1: Deteksi Header Dinamis di baris mana pun
-                    if any(header_word in parsed_row[0] for header_word in ["Tanggal", "Isi Berita", "URL"]):
-                        continue
+        #             # Solusi 1: Deteksi Header Dinamis di baris mana pun
+        #             if any(header_word in parsed_row[0] for header_word in ["Tanggal", "Isi Berita", "URL"]):
+        #                 continue
                         
-                    try:
-                        # Sekarang parsed_row sudah otomatis menjadi LIST yang bersih ([kolom1, kolom2, kolom3])
-                        if len(parsed_row) >= 3:
-                            tanggal = parsed_row[0].strip()
-                            isi_berita = parsed_row[1].strip()
-                            url = parsed_row[2].strip()
+        #             try:
+        #                 # Sekarang parsed_row sudah otomatis menjadi LIST yang bersih ([kolom1, kolom2, kolom3])
+        #                 if len(parsed_row) >= 3:
+        #                     tanggal = parsed_row[0].strip()
+        #                     isi_berita = parsed_row[1].strip()
+        #                     url = parsed_row[2].strip()
                             
-                            if len(isi_berita) > 10:
-                                writer.writerow([tanggal, isi_berita, url])
-                        else:
-                            # Fallback jika baris tidak sengaja kekurangan kolom
-                            join_row = " ".join(parsed_row).strip()
-                            if len(join_row) > 10:
-                                writer.writerow(["-", join_row, site.get('url', '-')])
-                    except Exception as parse_err:
-                        print(f"    [!] Gagal memproses baris data: {parse_err}")
+        #                     if len(isi_berita) > 10:
+        #                         writer.writerow([tanggal, isi_berita, url])
+        #                 else:
+        #                     # Fallback jika baris tidak sengaja kekurangan kolom
+        #                     join_row = " ".join(parsed_row).strip()
+        #                     if len(join_row) > 10:
+        #                         writer.writerow(["-", join_row, site.get('url', '-')])
+        #             except Exception as parse_err:
+        #                 print(f"    [!] Gagal memproses baris data: {parse_err}")
                             
     except Exception as e:
         print(f"[!] Kendala di situs {site['name']}: {e}")
