@@ -117,7 +117,7 @@ async def fetch_dynamic_config(url, max_retries=3, retry_delay=5):
                     f"<b>Detail Kendala:</b> <code>{e}</code>\n\n"
                     f"Sistem otomatis dihentikan."
                 )
-                send_telegram_message(error_msg)
+                await asyncio.to_thread(send_telegram_message, error_msg)
                 
     return [], {}, {}
 
@@ -1014,62 +1014,62 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                 urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
 
-        # if not urls_to_scrape: 
-        #     return
+        if not urls_to_scrape: 
+            return
         
-        # tasks = [fetch_article_data(context, url, tab_semaphore, site.get("selector_extract"), int(site.get("max_scroll_article", 12))) for url in urls_to_scrape]
-        # scraped_results = await asyncio.gather(*tasks)
-        # valid_results = [res for res in scraped_results if res is not None]
+        tasks = [fetch_article_data(context, url, tab_semaphore, site.get("selector_extract"), int(site.get("max_scroll_article", 12))) for url in urls_to_scrape]
+        scraped_results = await asyncio.gather(*tasks)
+        valid_results = [res for res in scraped_results if res is not None]
         
-        # if not valid_results:
-        #     return
+        if not valid_results:
+            return
         
-        # memory_data_csv = io.StringIO()
-        # csv_writer = csv.writer(memory_data_csv)
-        # csv_writer.writerow(["URL", "RawText"])
-        # for res in valid_results: 
-        #     csv_writer.writerow([res['url'], res['text'][:5000].replace('\n', ' ')])
+        memory_data_csv = io.StringIO()
+        csv_writer = csv.writer(memory_data_csv)
+        csv_writer.writerow(["URL", "RawText"])
+        for res in valid_results: 
+            csv_writer.writerow([res['url'], res['text'][:5000].replace('\n', ' ')])
         
-        # final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
+        final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
         
-        # if "berita tidak sesuai dengan topik yang diinginkan" in final_extracted_data.lower():
-        #     return
+        if "berita tidak sesuai dengan topik yang diinginkan" in final_extracted_data.lower():
+            return
 
-        # if final_extracted_data.strip():
-        #     print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
+        if final_extracted_data.strip():
+            print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
             
-        #     # Solusi 3: Menggunakan io.StringIO agar teks dibaca layaknya file utuh
-        #     f_input = io.StringIO(final_extracted_data.strip())
-        #     # Solusi 2: Memanfaatkan modul csv.reader resmi Python untuk parsing text
-        #     reader_gemini = csv.reader(f_input, delimiter=',', quotechar='"')
+            # Solusi 3: Menggunakan io.StringIO agar teks dibaca layaknya file utuh
+            f_input = io.StringIO(final_extracted_data.strip())
+            # Solusi 2: Memanfaatkan modul csv.reader resmi Python untuk parsing text
+            reader_gemini = csv.reader(f_input, delimiter=',', quotechar='"')
             
-        #     with open(master_file_name, 'a', newline='', encoding='utf-8') as f_append:
-        #         writer = csv.writer(f_append, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+            with open(master_file_name, 'a', newline='', encoding='utf-8') as f_append:
+                writer = csv.writer(f_append, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
                 
-        #         for parsed_row in reader_gemini:
-        #             if not parsed_row:
-        #                 continue
+                for parsed_row in reader_gemini:
+                    if not parsed_row:
+                        continue
                     
-        #             # Solusi 1: Deteksi Header Dinamis di baris mana pun
-        #             if any(header_word in parsed_row[0] for header_word in ["Tanggal", "Isi Berita", "URL"]):
-        #                 continue
+                    # Solusi 1: Deteksi Header Dinamis di baris mana pun
+                    if any(header_word in parsed_row[0] for header_word in ["Tanggal", "Isi Berita", "URL"]):
+                        continue
                         
-        #             try:
-        #                 # Sekarang parsed_row sudah otomatis menjadi LIST yang bersih ([kolom1, kolom2, kolom3])
-        #                 if len(parsed_row) >= 3:
-        #                     tanggal = parsed_row[0].strip()
-        #                     isi_berita = parsed_row[1].strip()
-        #                     url = parsed_row[2].strip()
+                    try:
+                        # Sekarang parsed_row sudah otomatis menjadi LIST yang bersih ([kolom1, kolom2, kolom3])
+                        if len(parsed_row) >= 3:
+                            tanggal = parsed_row[0].strip()
+                            isi_berita = parsed_row[1].strip()
+                            url = parsed_row[2].strip()
                             
-        #                     if len(isi_berita) > 10:
-        #                         writer.writerow([tanggal, isi_berita, url])
-        #                 else:
-        #                     # Fallback jika baris tidak sengaja kekurangan kolom
-        #                     join_row = " ".join(parsed_row).strip()
-        #                     if len(join_row) > 10:
-        #                         writer.writerow(["-", join_row, site.get('url', '-')])
-        #             except Exception as parse_err:
-        #                 print(f"    [!] Gagal memproses baris data: {parse_err}")
+                            if len(isi_berita) > 10:
+                                writer.writerow([tanggal, isi_berita, url])
+                        else:
+                            # Fallback jika baris tidak sengaja kekurangan kolom
+                            join_row = " ".join(parsed_row).strip()
+                            if len(join_row) > 10:
+                                writer.writerow(["-", join_row, site.get('url', '-')])
+                    except Exception as parse_err:
+                        print(f"    [!] Gagal memproses baris data: {parse_err}")
                             
     except Exception as e:
         print(f"[!] Kendala di situs {site['name']}: {e}")
@@ -1114,106 +1114,106 @@ async def main():
             writer = csv.writer(final_csv_file)
             writer.writerow(["Tanggal", "Isi Berita", "URL"])
 
-    # # [3] Ambil data Saham LQ45 IDX secara dinamis
-    # # [3] Ambil data Saham LQ45 IDX secara dinamis
-    # idx_lq45_row = await saham_lq45_terbaik_idx()
-    # if idx_lq45_row:
-    #     waktu_idx = idx_lq45_row[0]
-    #     isi_konten_idx = idx_lq45_row[1]
-    #     url_idx = idx_lq45_row[2]
+    # [3] Ambil data Saham LQ45 IDX secara dinamis
+    # [3] Ambil data Saham LQ45 IDX secara dinamis
+    idx_lq45_row = await saham_lq45_terbaik_idx()
+    if idx_lq45_row:
+        waktu_idx = idx_lq45_row[0]
+        isi_konten_idx = idx_lq45_row[1]
+        url_idx = idx_lq45_row[2]
 
-    #     isi_konten_simpan_idx = "DATA Top SAHAM LQ45 IDX TERBARU\n" + isi_konten_idx
-    #     data_simpan_idx_lq45_row = [waktu_idx, isi_konten_simpan_idx, url_idx]
+        isi_konten_simpan_idx = "DATA Top SAHAM LQ45 IDX TERBARU\n" + isi_konten_idx
+        data_simpan_idx_lq45_row = [waktu_idx, isi_konten_simpan_idx, url_idx]
        
-    #     with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
-    #         writer = csv.writer(final_csv_file)
-    #         writer.writerow(data_simpan_idx_lq45_row)
-    #     print(f"[+] Sukses menyimpan data Saham LQ45 IDX ke file master lokal: {master_file_name}\n")
+        with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
+            writer = csv.writer(final_csv_file)
+            writer.writerow(data_simpan_idx_lq45_row)
+        print(f"[+] Sukses menyimpan data Saham LQ45 IDX ke file master lokal: {master_file_name}\n")
         
-    #     try:
-    #         zona_wib = pytz.timezone('Asia/Jakarta')
-    #         now_realtime = datetime.now(zona_wib)
-    #         hari_en_to_id = {"Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"}
-    #         bulan_en_to_id = {"January": "Januari", "February": "Februari", "March": "Maret", "April": "April", "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus", "September": "September", "October": "Oktober", "November": "November", "December": "Desember"}
-    #         hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
-    #         bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
-    #         waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
-    #         tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
+        try:
+            zona_wib = pytz.timezone('Asia/Jakarta')
+            now_realtime = datetime.now(zona_wib)
+            hari_en_to_id = {"Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"}
+            bulan_en_to_id = {"January": "Januari", "February": "Februari", "March": "Maret", "April": "April", "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus", "September": "September", "October": "Oktober", "November": "November", "December": "Desember"}
+            hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
+            bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
+            waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
+            tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
             
-    #         header_pesan_idx = (
-    #             f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
-    #             f"<b>REKOMENDASI SAHAM LQ45 IDX TERBAIK HARI INI</b>\n"
-    #             f"────────────────────\n\n"
-    #         )
+            header_pesan_idx = (
+                f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
+                f"<b>REKOMENDASI SAHAM LQ45 IDX TERBAIK HARI INI</b>\n"
+                f"────────────────────\n\n"
+            )
             
-    #         pesan_full_idx = header_pesan_idx + isi_konten_idx
+            pesan_full_idx = header_pesan_idx + isi_konten_idx
             
-    #         print("[-] Mengirimkan data Saham LQ45 IDX ke Telegram...")
-    #         await asyncio.to_thread(send_telegram_message, pesan_full_idx)
-    #         print("[+] Data Saham LQ45 IDX berhasil dikirim ke Telegram.")
-    #         await asyncio.sleep(3)
-    #     except Exception as telegram_idx_err:
-    #         print(f"[!] Gagal mengirim data IDX ke Telegram: {telegram_idx_err}")
+            print("[-] Mengirimkan data Saham LQ45 IDX ke Telegram...")
+            await asyncio.to_thread(send_telegram_message, pesan_full_idx)
+            print("[+] Data Saham LQ45 IDX berhasil dikirim ke Telegram.")
+            await asyncio.sleep(3)
+        except Exception as telegram_idx_err:
+            print(f"[!] Gagal mengirim data IDX ke Telegram: {telegram_idx_err}")
 
-    # # [4] Ambil data finansial Yahoo secara dinamis
-    # # [4] Ambil data finansial Yahoo secara dinamis
-    # finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
-    # if finansial_row:
-    #     waktu_yahoo = finansial_row[0]
-    #     isi_konten_yahoo = finansial_row[1]
-    #     url_yahoo = finansial_row[2]
+    # [4] Ambil data finansial Yahoo secara dinamis
+    # [4] Ambil data finansial Yahoo secara dinamis
+    finansial_row = await asyncio.to_thread(fetch_yahoo_finance_data, TICKERS)
+    if finansial_row:
+        waktu_yahoo = finansial_row[0]
+        isi_konten_yahoo = finansial_row[1]
+        url_yahoo = finansial_row[2]
         
-    #     isi_konten_simpan_yahoo = "DATA HARGA MULTI ASET TERBARU\n" + isi_konten_yahoo
-    #     data_simpan_yahoo_row = [waktu_yahoo, isi_konten_simpan_yahoo, url_yahoo]
+        isi_konten_simpan_yahoo = "DATA HARGA MULTI ASET TERBARU\n" + isi_konten_yahoo
+        data_simpan_yahoo_row = [waktu_yahoo, isi_konten_simpan_yahoo, url_yahoo]
 
-    #     with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
-    #         writer = csv.writer(final_csv_file)
-    #         writer.writerow(data_simpan_yahoo_row)
-    #     print(f"[+] Sukses menyimpan data finansial Yahoo ke file master lokal: {master_file_name}\n")
+        with open(master_file_name, 'a', newline='', encoding='utf-8') as final_csv_file:
+            writer = csv.writer(final_csv_file)
+            writer.writerow(data_simpan_yahoo_row)
+        print(f"[+] Sukses menyimpan data finansial Yahoo ke file master lokal: {master_file_name}\n")
         
-    #     # =====================================================================
-    #     # TAMBAHAN: KIRIM DATA YAHOO FINANCE LANGSUNG KE TELEGRAM
-    #     # =====================================================================
-    #     try:
-    #         zona_wib = pytz.timezone('Asia/Jakarta')
-    #         now_realtime = datetime.now(zona_wib)
+        # =====================================================================
+        # TAMBAHAN: KIRIM DATA YAHOO FINANCE LANGSUNG KE TELEGRAM
+        # =====================================================================
+        try:
+            zona_wib = pytz.timezone('Asia/Jakarta')
+            now_realtime = datetime.now(zona_wib)
             
-    #         hari_en_to_id = {
-    #             "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
-    #             "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
-    #         }
-    #         bulan_en_to_id = {
-    #             "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
-    #             "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
-    #             "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
-    #         }
+            hari_en_to_id = {
+                "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
+                "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
+            }
+            bulan_en_to_id = {
+                "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
+                "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
+                "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
+            }
             
-    #         hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
-    #         bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
+            hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
+            bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
             
-    #         waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
-    #         tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
+            waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
+            tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
             
-    #         # Header sesuai permintaan Anda
-    #         header_pesan_yahoo = (
-    #             f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
-    #             f"<b>Data Pergerakan Harga</b>\n"
-    #             f"────────────────────\n\n"
-    #         )
+            # Header sesuai permintaan Anda
+            header_pesan_yahoo = (
+                f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
+                f"<b>Data Pergerakan Harga</b>\n"
+                f"────────────────────\n\n"
+            )
             
-    #         # isi_berita_finansial ada di index ke-1 dari finansial_row
-    #         isi_konten_yahoo = re.sub(r'(===.*?===)', r'<b>\1</b>', isi_konten_yahoo)
-    #         pesan_full_yahoo = header_pesan_yahoo + isi_konten_yahoo
+            # isi_berita_finansial ada di index ke-1 dari finansial_row
+            isi_konten_yahoo = re.sub(r'(===.*?===)', r'<b>\1</b>', isi_konten_yahoo)
+            pesan_full_yahoo = header_pesan_yahoo + isi_konten_yahoo
             
-    #         print("[-] Mengirimkan data Yahoo Finance ke Telegram...")
-    #         await asyncio.to_thread(send_telegram_message, pesan_full_yahoo)
-    #         print("[+] Data Yahoo Finance berhasil dikirim ke Telegram.")
+            print("[-] Mengirimkan data Yahoo Finance ke Telegram...")
+            await asyncio.to_thread(send_telegram_message, pesan_full_yahoo)
+            print("[+] Data Yahoo Finance berhasil dikirim ke Telegram.")
             
-    #         # Jeda singkat setelah kirim pesan agar aman dari rate limit Telegram
-    #         await asyncio.sleep(3)
+            # Jeda singkat setelah kirim pesan agar aman dari rate limit Telegram
+            await asyncio.sleep(3)
             
-    #     except Exception as telegram_yahoo_err:
-    #         print(f"[!] Gagal mengirim data Yahoo Finance ke Telegram: {telegram_yahoo_err}")
+        except Exception as telegram_yahoo_err:
+            print(f"[!] Gagal mengirim data Yahoo Finance ke Telegram: {telegram_yahoo_err}")
         
     # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
     # [5] Proses Scraping Multi-Situs Web Berdasarkan Config Spreadsheet
@@ -1262,9 +1262,9 @@ async def main():
             
             await browser.close()
 
-    # # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    # # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    # await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
+    # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
+    await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
 
 if __name__ == "__main__":
     asyncio.run(main())
