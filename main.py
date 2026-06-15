@@ -733,7 +733,7 @@ async def handle_rss_feed(rss_url, engine="firecrawl", page=None):
                 elif 'link' in entry:
                     daftar_berita.append(entry['link'])
                     
-            print(f" [+] Berhasil menemukan {len(daftar_berita)} link berita dari RSS.")
+            print(f" [+] Berhasil menemukan {len(daftar_berita)} link berita dari {rss_url}.")
         else:
             print(" [!] Tidak ada konten yang berhasil diambil dari RSS feed.")
 
@@ -900,6 +900,9 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             
             raw_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
             unique_links = list(set([link for link in raw_links if link]))
+
+            print(f" [+] Berhasil menemukan {len(unique_links)} link berita dari {site['url']}.")
+
             if unique_links:
                 memory_links_csv = io.StringIO()
                 writer = csv.writer(memory_links_csv)
@@ -970,6 +973,9 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                     break
             
             unique_links = list(set([link for link in all_raw_links if link]))
+
+            print(f" [+] Berhasil menemukan {len(unique_links)} link berita dari {site['url']}.")
+
             if unique_links:
                 memory_links_csv = io.StringIO()
                 writer = csv.writer(memory_links_csv)
@@ -1005,6 +1011,9 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                     continue
             
             unique_links = list(set([link for link in all_raw_links if link]))
+
+            print(f" [+] Berhasil menemukan {len(unique_links)} link berita dari {site['url']}.")
+            
             if unique_links:
                 memory_links_csv = io.StringIO()
                 writer = csv.writer(memory_links_csv)
@@ -1013,6 +1022,46 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 
                 filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                 urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
+
+        elif site["handling_method"] == "firecrawl":
+            print(f" [*] Menggunakan Firecrawl untuk membuka {site['url']}")
+            try:
+                # Inisialisasi firecrawl (pola ini mirip dengan fungsi saham_lq45_terbaik_idx Anda)
+                if not FIRECRAWL_API_KEY:
+                    print(" [!] Gagal: FIRECRAWL_API_KEY tidak ditemukan di .env")
+                    return
+                
+                app = Firecrawl(api_key=FIRECRAWL_API_KEY)
+                
+                # Melakukan scrape menggunakan firecrawl dengan format ekstrak link
+                # Kita arahkan agar firecrawl mengembalikan objek yang bersih
+                scrape_result = app.scrape(
+                    site['url'], 
+                    formats=["links"]
+                )
+                
+                # Mengambil daftar tautan yang berhasil diekstrak oleh Firecrawl
+                raw_links = scrape_result.links
+                
+                # Filter tautan agar hanya mengambil yang unik dan valid
+                unique_links = list(set([link for link in raw_links if link]))
+                
+                # Cetak jumlah hasil pencarian sesuai format Anda
+                print(f" [+] Berhasil menemukan {len(unique_links)} link berita dari {site['url']}.")
+
+                if unique_links:
+                    memory_links_csv = io.StringIO()
+                    writer = csv.writer(memory_links_csv)
+                    writer.writerow(["Raw_URL"])
+                    for link in unique_links: writer.writerow([link])
+                    
+                    filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
+                    urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
+
+            except Exception as e:
+                print(f" [!] Error saat menggunakan Firecrawl pada {site['url']}: {e}")
+                unique_links = []
+
 
         if not urls_to_scrape: 
             return
@@ -1028,7 +1077,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
         csv_writer = csv.writer(memory_data_csv)
         csv_writer.writerow(["URL", "RawText"])
         for res in valid_results: 
-            csv_writer.writerow([res['url'], res['text'][:5000].replace('\n', ' ')])
+            csv_writer.writerow([res['url'], res['text'][:8000].replace('\n', ' ')])
         
         final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
         
@@ -1239,10 +1288,10 @@ async def main():
                 else route.continue_()
             )
             
-            # Semaphore 1: Membatasi maksimal 3 situs yang berjalan PARALEL dalam satu waktu
-            site_semaphore = asyncio.Semaphore(3)
+            # Semaphore 1: Membatasi maksimal 5 situs yang berjalan PARALEL dalam satu waktu
+            site_semaphore = asyncio.Semaphore(5)
             
-            # Semaphore 2: Membatasi max 5 tab artikel terbuka bersamaan di internal seluruh situs
+            # Semaphore 2: Membatasi max 10 tab artikel terbuka bersamaan di internal seluruh situs
             tab_semaphore = asyncio.Semaphore(10)
             
             # Fungsi pembungkus (wrapper) untuk menerapkan limitasi site_semaphore
@@ -1256,7 +1305,7 @@ async def main():
                 for site in WEBSITES
             ]
             
-            print(f"[-] Menjalankan scraping untuk {len(WEBSITES)} situs dengan sistem antrean (Maks 3 situs paralel)...")
+            print(f"[-] Menjalankan scraping untuk {len(WEBSITES)} situs dengan sistem antrean (Maks 5 situs paralel)...")
             # Memicu eksekusi paralel yang sudah dibatasi
             await asyncio.gather(*site_tasks)
             
