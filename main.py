@@ -517,6 +517,55 @@ def fetch_yahoo_finance_data(tickers_dict):
     return None
 
 # ==========================================
+# FUNGSI AMBIL DAFTAR URL BERITA YAHOO FINANCE
+# ==========================================
+async def fetch_yahoo_finance_news_urls(ticker_code="BTC-USD"):
+    """
+    Mengambil data berita terbaru dari Yahoo Finance berdasarkan kode ticker.
+    Mengembalikan list berisi kumpulan URL berita saja.
+    """
+    print(f"[-] Mengambil daftar URL berita terbaru untuk {ticker_code} dari Yahoo Finance...")
+    daftar_berita = set()
+    
+    try:
+        ticker = yf.Ticker(str(ticker_code).strip())
+        # Menjalankan objek pemanggilan data I/O blocking di thread terpisah agar asinkron aman
+        btc_news = await asyncio.to_thread(lambda: ticker.news)
+        
+        if not btc_news:
+            print(f"[!] Tidak ada berita ditemukan untuk {ticker_code}.")
+            return daftar_berita
+            
+        if btc_news:
+            for news in btc_news:
+                content = news.get('content', {})
+                if not content:
+                    continue
+                
+                # 1. Coba ambil dari canonicalUrl (Sering digunakan oleh tipe STORY/Artikel)
+                link = content.get('canonicalUrl', {}).get('url')
+                
+                # 2. Jika tidak ada, coba ambil dari clickThroughUrl (Sering digunakan oleh tipe VIDEO)
+                if not link:
+                    link = content.get('clickThroughUrl', {}).get('url')
+                    
+                # 3. Jalur alternatif terakhir (pubShortUrl)
+                if not link:
+                    link = content.get('pubShortUrl')
+                
+                # Masukkan ke set jika link valid
+                if link and isinstance(link, str) and link.startswith("http"):
+                    daftar_berita.add(link)
+                
+        print(f" [+] Berhasil menemukan {len(daftar_berita)} berita dari Yahoo {ticker_code}.")
+        
+        return daftar_berita
+        
+    except Exception as e:
+        print(f"    [!] Gagal mengambil berita Yahoo Finance untuk {ticker_code}: {e}")
+        return daftar_berita
+    
+# ==========================================
 # FUNGSI NOTIFIKASI TELEGRAM
 # ==========================================
 # =====================================================================
@@ -1062,6 +1111,10 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 print(f" [!] Error saat menggunakan Firecrawl pada {site['url']}: {e}")
                 unique_links = []
 
+        elif site["handling_method"] == "yahoo_news":
+            yahoo_news_links = await fetch_yahoo_finance_news_urls(site["url"])
+            urls_to_scrape = list(set(yahoo_news_links))[:int(site['max_articles'])]
+            
 
         if not urls_to_scrape: 
             return
@@ -1073,6 +1126,8 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
         if not valid_results:
             return
         
+        print(f" [+] Mengambil {len(valid_results)} isi berita dari {site['url']}.")
+        
         memory_data_csv = io.StringIO()
         csv_writer = csv.writer(memory_data_csv)
         csv_writer.writerow(["URL", "RawText"])
@@ -1080,9 +1135,6 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             csv_writer.writerow([res['url'], res['text'][:8000].replace('\n', ' ')])
         
         final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
-        
-        if "berita tidak sesuai dengan topik yang diinginkan" in final_extracted_data.lower():
-            return
 
         if final_extracted_data.strip():
             print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
