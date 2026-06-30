@@ -21,16 +21,21 @@ jobs:
           cache: "pip" # Mengaktifkan caching otomatis untuk mempercepat run berikutnya
 
       - name: Install Dependencies
+        id: install-pip
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Mengambil versi playwright yang terinstal untuk penamaan cache
+          echo "PLAYWRIGHT_VERSION=$(pip show playwright | grep Version | cut -d' ' -f2)" >> $GITHUB_ENV
 
       - name: Cache Playwright Browsers
         id: playwright-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
+          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}-
 
       - name: Install Playwright Browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -40,7 +45,7 @@ jobs:
       - name: Install Playwright System Dependencies (If Cache Hit)
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: |
-          playwright install-deps chromium
+          sudo playwright install-deps chromium
 
       - name: Run Scraper Script
         env:
@@ -51,6 +56,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WEB_APP_SCRIPT_URL: ${{ secrets.WEB_APP_SCRIPT_URL }}
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
-        timeout-minutes: 90 # <-- HANYA MEMBATASI PROSES RUN PYTHON INI MAKSIMAL 1 JAM 30 menit
+        timeout-minutes: 90
         run: |
           python main.py
