@@ -42,11 +42,6 @@ jobs:
         run: |
           playwright install chromium --with-deps
 
-      - name: Install Playwright System Dependencies (If Cache Hit)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: |
-          sudo playwright install-deps chromium
-
       - name: Run Scraper Script
         env:
           GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 }}
