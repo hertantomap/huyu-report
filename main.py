@@ -199,7 +199,7 @@ async def extract_content_with_gemini(prompt, csv_string):
 # FUNGSI 3: ANALISIS DATA BERITA MASTER
 # ==========================================
 async def ask_gemini_with_inline_csv(prompt, csv_string):
-    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
+    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
     data_csv_mentah = csv_string.encode('utf-8')
 
     current_client = await client_rotator.get_client() # Ambil giliran client
