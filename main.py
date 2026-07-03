@@ -1038,27 +1038,46 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
             all_raw_links = []
             total_pages = int(site.get("total_pages", 1)) if site.get("total_pages") else int(site.get("click_count", 1))
             
-            for page_num in range(1, total_pages + 1):
-                target_url = f"{site['url']}{page_num}"
-                try:
-                    # 1. Gunakan wait_until="load" dengan timeout eksplisit (misal 20 detik)
-                    # Ini mencegah skrip menggantung terlalu lama di satu halaman yang rusak
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-
-                    # 2. Lakukan scroll dan ambil data jika halaman berhasil terbuka
-                    await auto_scroll(page, max_scroll_steps=10)
-                    raw_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
-                    all_raw_links.extend(raw_links)
+            # CEK: Jika engine menggunakan firecrawl
+            if site.get("engine_browser") == "firecrawl":
+                print(f" [*] Menggunakan Firecrawl dengan mode Pagination untuk {site['url']}")
+                if not FIRECRAWL_API_KEY:
+                    print(" [!] Gagal: FIRECRAWL_API_KEY tidak ditemukan di .env")
+                    return
+                
+                app = Firecrawl(api_key=FIRECRAWL_API_KEY)
+                
+                for page_num in range(1, total_pages + 1):
+                    target_url = f"{site['url']}{page_num}"
+                    try:
+                        print(f" [+] Scraping via Firecrawl Halaman {page_num}: {target_url}")
+                        scrape_result = app.scrape(target_url, formats=["links"])
+                        raw_links = scrape_result.links
+                        all_raw_links.extend(raw_links)
+                    except Exception as e:
+                        print(f" [!] Error Firecrawl di halaman {page_num}: {e}. Melompati...")
+                        continue
                     
-                except (asyncio.TimeoutError, PlaywrightTimeoutError) as t_err:
-                    # Jika page.goto yang timeout, lewati halaman ini dan lanjut ke page_num berikutnya
-                    print(f"    [!] Halaman {page_num} lambat/gagal dimuat (Timeout). Melompati ke halaman berikutnya...")
-                    continue
-                except Exception as page_err:
-                    # Jika ada error aneh lainnya pada halaman tersebut
-                    print(f"    [!] Error tidak terduga di halaman {page_num}: {page_err}. Melompati...")
-                    continue
-            
+            # JIKA BUKAN FIRECRAWL (Gunakan Playwright seperti biasa)
+            else:
+                for page_num in range(1, total_pages + 1):
+                    target_url = f"{site['url']}{page_num}"
+                    try:
+                        # 1. Gunakan wait_until="load" dengan timeout eksplisit (misal 20 detik)
+                        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+
+                        # 2. Lakukan scroll dan ambil data jika halaman berhasil terbuka
+                        await auto_scroll(page, max_scroll_steps=10)
+                        raw_links = await page.evaluate("Array.from(document.querySelectorAll('a')).map(a => a.href)")
+                        all_raw_links.extend(raw_links)
+                        
+                    except (asyncio.TimeoutError, PlaywrightTimeoutError) as t_err:
+                        print(f"    [!] Halaman {page_num} lambat/gagal dimuat (Timeout). Melompati ke halaman berikutnya...")
+                        continue
+                    except Exception as page_err:
+                        print(f"    [!] Error tidak terduga di halaman {page_num}: {page_err}. Melompati...")
+                        continue
+            # --- Proses Pemfilteran (Bagian ini dipakai bersama oleh Firecrawl maupun Playwright) ---
             unique_links = list(set([link for link in all_raw_links if link]))
 
             print(f" [+] Berhasil menemukan {len(unique_links)} link berita dari {site['url']}.")
