@@ -97,12 +97,17 @@ print(f"[*] Sistem Rate Limiter diatur ke {gemini_limiter.max_requests} request 
 # ==========================================
 async def fetch_dynamic_config(url, max_retries=3, retry_delay=5):
     print("[-] Mengambil konfigurasi dinamis (Websites, Prompts, Tickers) dari Google Spreadsheet...")
+    
+    # Pindahkan definisi ke sini agar hanya dibuat satu kali di memori
+    def fetch_url_sync(target_url):
+        with urllib.request.urlopen(target_url, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+
     for attempt in range(1, max_retries + 1):
         try:
-            # Gunakan urllib dengan timeout ketat
-            with urllib.request.urlopen(url, timeout=15) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                return res_data.get("websites", []), res_data.get("prompts", {}), res_data.get("tickers", {})
+            # Panggil menggunakan to_thread
+            res_data = await asyncio.to_thread(fetch_url_sync, url)
+            return res_data.get("websites", []), res_data.get("prompts", {}), res_data.get("tickers", {})
                 
         except Exception as e:
             print(f"    [!] Percobaan ke-{attempt} gagal: {e}")
@@ -117,6 +122,8 @@ async def fetch_dynamic_config(url, max_retries=3, retry_delay=5):
                     f"<b>Detail Kendala:</b> <code>{e}</code>\n\n"
                     f"Sistem otomatis dihentikan."
                 )
+                # Catatan: Pastikan fungsi send_telegram_message Anda memang fungsi sinkron (bukan async def). 
+                # Jika sudah async def, cukup gunakan: await send_telegram_message(error_msg)
                 await asyncio.to_thread(send_telegram_message, error_msg)
                 
     return [], {}, {}
@@ -232,7 +239,7 @@ async def ask_gemini_with_inline_csv(prompt, csv_string):
 async def saham_lq45_terbaik_idx():
     print("[-] Mengambil data Saham LQ45 terbaik dari IDX...")
 
-    jumlah_pilihan = 10
+    jumlah_pilihan = 15
     
     saham_lq45 = {
         "AADI", "ADMR", "ADRO", "AKRA", "AMMN", "AMRT", "ANTM", 
@@ -248,7 +255,9 @@ async def saham_lq45_terbaik_idx():
 
     firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
 
-    doc = firecrawl.scrape(
+    # Kode firecrawl.scrape NYA TETAP SAMA, hanya ditambahkan await asyncio.to_thread di depannya
+    doc = await asyncio.to_thread(
+        firecrawl.scrape,
         "https://www.idx.co.id/primary/TradingSummary/GetStockSummary?length=1000&start=0", 
         formats=["html"]
     )
@@ -272,6 +281,7 @@ async def saham_lq45_terbaik_idx():
         except Exception as e:
             print("Gagal parsing JSON. Teks mentah yang diterima:")
             print(raw_json_str)
+            return None
 
     pool_saham = []
     
@@ -844,75 +854,85 @@ async def fetch_article_data(context, url, semaphore, selector_extract=None, max
 # ==========================================
 # PROSES [9]: ANALISIS BERITA MASTER AI (BERURUTAN)
 # ==========================================
-async def proses_analisis_berita_master(master_file_name, prompts_dict, prompt_dasar_format):
-    print(f"\n======================================")
-    print(f"[9] MEMULAI PROSES ANALISIS DATA BERITA MASTER AI")
-    print(f"======================================")
-    
-    hari_en_to_id = {
-        "Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu", 
-        "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"
-    }
-    bulan_en_to_id = {
-        "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
-        "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
-        "September": "September", "October": "Oktober", "November": "November", "December": "Desember"
-    }
-    
-    zona_wib = pytz.timezone('Asia/Jakarta')
-    now_init = datetime.now(zona_wib)
-    hari_init = hari_en_to_id.get(now_init.strftime("%A"), now_init.strftime("%A"))
-    bulan_init = bulan_en_to_id.get(now_init.strftime("%B"), now_init.strftime("%B"))
-    tanggal_init_indo = f"{hari_init}, {now_init.strftime('%d')} {bulan_init} {now_init.strftime('%Y')} pukul {now_init.strftime('%H:%M:%S')} WIB"
-    
+async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_dasar_format):
+    """
+    Fungsi untuk menganalisis data CSV master menggunakan metode Chunking
+    dengan kapasitas besar (CHUNK_SIZE = 200).
+    """
+    if not os.path.exists(master_file_name):
+        print(f"[!] File master {master_file_name} tidak ditemukan. Analisis dibatalkan.")
+        return
+
     try:
-        with open(master_file_name, 'r', encoding='utf-8') as f:
-            csv_content = f.read()
-            
-        if len(csv_content.strip()) <= 50:
-            print("[!] Berkas master kosong atau hanya berisi header.")
-            return
-
-        daftar_prompt_keys = list(prompts_dict.keys())
-        prompt_tugas = [key for key in daftar_prompt_keys if key != "PROMPT_DASAR_FORMAT"]
-        
-        for index, key_name in enumerate(prompt_tugas):
-            print(f"[-] Menjalankan AI untuk Prompt: '{key_name}' ({index + 1}/{len(prompt_tugas)})...")
-            instruksi_ai = f"{prompts_dict[key_name]}\n\n{prompt_dasar_format}"
-            
-            hasil_analisis = await ask_gemini_with_inline_csv(instruksi_ai, csv_content)
-            
-            if hasil_analisis.strip():
-                now_realtime = datetime.now(zona_wib)
-                hari_realtime = hari_en_to_id.get(now_realtime.strftime("%A"), now_realtime.strftime("%A"))
-                bulan_realtime = bulan_en_to_id.get(now_realtime.strftime("%B"), now_realtime.strftime("%B"))
-                
-                waktu_wib_realtime = now_realtime.strftime("%H:%M:%S") + " WIB"
-                tanggal_kirim_indo = f"{hari_realtime}, {now_realtime.strftime('%d')} {bulan_realtime} {now_realtime.strftime('%Y')}"
-                
-                nama_bersih = key_name.replace("_", " ")
-                if nama_bersih.startswith("PROMPT "):
-                    nama_bersih = nama_bersih.replace("PROMPT ", "", 1)
-                
-                header_pesan = (
-                    f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
-                    f"<b>{nama_bersih}</b>\n"
-                    f"────────────────────\n\n"
-                )
-                
-                pesan_full = header_pesan + hasil_analisis
-                await asyncio.to_thread(send_telegram_message, pesan_full)
-                
-                # Jeda anti-spam Telegram (5-10 detik)
-                if index < len(prompt_tugas) - 1:
-                    await asyncio.sleep(random.randint(5, 10))
-            else:
-                print(f"[!] Hasil analisis untuk '{key_name}' kosong.")
-
-        print("[+] Semua prompt analisis sukses diproses.")
-        
+        df = pd.read_csv(master_file_name)
     except Exception as e:
-        print(f"[!] Gagal pada proses analisis master berita: {e}")
+        print(f"[!] Gagal membaca file CSV: {e}")
+        return
+
+    total_baris = len(df)
+    if total_baris == 0:
+        print("[!] File CSV kosong. Tidak ada data untuk dianalisis.")
+        return
+
+    # [UBAH] Ukuran chunk dinaikkan menjadi 200 baris
+    CHUNK_SIZE = 200 
+    
+    print(f"\n==================================================")
+    print(f"[9] MEMULAI PROSES ANALISIS DATA BERITA MASTER AI (METHOD: LARGE CHUNKING)")
+    print(f"==================================================")
+    print(f"[-] Total data: {total_baris} baris. Ukuran Chunk: {CHUNK_SIZE} baris per request.\n")
+
+    for prompt_key, prompt_text in prompts_data.items():
+        print(f"[-] Menjalankan AI untuk Prompt: '{prompt_key}'...")
+        
+        hasil_parsial_prompt = []
+        chunk_counter = 1
+        
+        for i in range(0, total_baris, CHUNK_SIZE):
+            df_chunk = df.iloc[i : i + CHUNK_SIZE]
+            
+            csv_buffer = io.StringIO()
+            df_chunk.to_csv(csv_buffer, index=False)
+            csv_string_chunk = csv_buffer.getvalue()
+            
+            print(f"    [-] Memproses Chunk ke-{chunk_counter} ({len(df_chunk)} baris)...")
+            
+            prompt_lengkap = f"{prompt_text}\n\n{prompt_dasar_format}"
+            
+            respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, csv_string_chunk)
+            
+            if respons_ai:
+                hasil_parsial_prompt.append(f"--- ANALISIS DATA BATCH {chunk_counter} ---\n{respons_ai}")
+            else:
+                hasil_parsial_prompt.append(f"--- ANALISIS DATA BATCH {chunk_counter} ---\n[AI Gagal Merespons]")
+            
+            chunk_counter += 1 
+        
+        # 1. GABUNGKAN HASIL FULL DARI SEMUA CHUNK UNTUK PROMPT INI
+        analisis_akhir_prompt = "\n\n".join(hasil_parsial_prompt)
+
+        # 2. SIAPKAN VARIABEL UNTUK HEADER (Pastikan variabel ini sudah didefinisikan sebelumnya di program Anda)
+        # Contoh jika mengambil waktu lokal saat ini:
+        tz_jkt = pytz.timezone('Asia/Jakarta')
+        waktu_sekarang = datetime.now(tz_jkt)
+        tanggal_kirim_indo = waktu_sekarang.strftime("%A, %d %B %Y") # Sesuaikan format teks lokal jika perlu
+        waktu_wib_realtime = waktu_sekarang.strftime("%H:%M:%S WIB")
+        nama_bersih = prompt_key.replace("_", " ").title() # Mengubah PROMPT_RANGKUMAN_BERITA menjadi Prompt Rangkuman Berita
+        
+        header_pesan = (
+            f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
+            f"<b>{nama_bersih}</b>\n"
+            f"────────────────────\n\n"
+        )
+        
+        # 3. KIRIM PESAN KE TELEGRAM
+        pesan_full = header_pesan + analisis_akhir_prompt
+        
+        await asyncio.to_thread(send_telegram_message, pesan_full)
+
+        print(f"[+] Selesai memproses dan mengirim Prompt: '{prompt_key}' ke Telegram.\n")
+
+    print("[+] Seluruh proses analisis berita selesai dengan metode Large Chunking!")
 
 # ==========================================
 # PARALLEL SCRAPER PER SITE
