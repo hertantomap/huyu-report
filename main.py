@@ -205,10 +205,13 @@ async def extract_content_with_gemini(prompt, csv_string):
 # ==========================================
 # FUNGSI 3: ANALISIS DATA BERITA MASTER
 # ==========================================
-async def ask_gemini_with_inline_csv(prompt, csv_string):
-    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
-    data_csv_mentah = csv_string.encode('utf-8')
-
+async def ask_gemini_with_inline_csv(prompt, csv_data):
+    """
+    Fungsi Async Gemini dengan Fallback.
+    Dapat menerima csv_data berupa String (Teks) maupun Objek File dari AI Storage.
+    """
+    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it']
+    
     current_client = await client_rotator.get_client() # Ambil giliran client
     
     for model_name in models_fallback_order:
@@ -216,19 +219,27 @@ async def ask_gemini_with_inline_csv(prompt, csv_string):
         
         try:
             print(f"    [-] Mencoba menganalisis data menggunakan model Async: {model_name}...")
-            komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
             
+            # CEK TIPE DATA: Jika teks string biasa, ubah ke bytes. 
+            # Jika objek file cloud (punya properti uri), gunakan langsung.
+            if isinstance(csv_data, str):
+                data_csv_mentah = csv_data.encode('utf-8')
+                komponen_input = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+            else:
+                # Ini berarti csv_data adalah objek file_ref dari hasil .files.upload()
+                komponen_input = csv_data
+
             # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
             response = await current_client.aio.models.generate_content(
                 model=model_name,
-                contents=[komponen_csv, prompt]
+                contents=[komponen_input, prompt]
             )
             
             if response and response.text:
                 return response.text
                 
         except Exception as e:
-            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
+            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback...")
 
     print("    [!] Semua model untuk Analisis Data gagal merespons pada API Key ini.")
     return ""
@@ -856,8 +867,12 @@ async def fetch_article_data(context, url, semaphore, selector_extract=None, max
 # ==========================================
 async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_dasar_format):
     """
-    Fungsi untuk menganalisis data CSV master menggunakan metode Chunking
-    dengan kapasitas besar (CHUNK_SIZE = 200).
+    Fungsi analisis berita master:
+    1. Memecah CSV lokal menjadi potongan kecil (CHUNK_SIZE = 200).
+    2. Mengunggah setiap chunk SATU KALI ke Google AI Storage.
+    3. Menggunakan referensi file yang sama untuk setiap jenis prompt.
+    4. Mengirimkan hasil FULL per prompt ke Telegram dengan Header.
+    5. Menghapus file di AI Storage setelah semua proses selesai.
     """
     if not os.path.exists(master_file_name):
         print(f"[!] File master {master_file_name} tidak ditemukan. Analisis dibatalkan.")
@@ -874,50 +889,82 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         print("[!] File CSV kosong. Tidak ada data untuk dianalisis.")
         return
 
-    # [UBAH] Ukuran chunk dinaikkan menjadi 200 baris
-    CHUNK_SIZE = 200 
+    CHUNK_SIZE = 220 
     
     print(f"\n==================================================")
-    print(f"[9] MEMULAI PROSES ANALISIS DATA BERITA MASTER AI (METHOD: LARGE CHUNKING)")
+    print(f"[9] MEMULAI PROSES UPLOAD CHUNK DAN ANALISIS BERITA")
     print(f"==================================================")
-    print(f"[-] Total data: {total_baris} baris. Ukuran Chunk: {CHUNK_SIZE} baris per request.\n")
+    print(f"[-] Total data: {total_baris} baris. Mempersiapkan upload per {CHUNK_SIZE} baris...")
 
+    # Ambil client aktif pertama untuk proses upload berkas
+    current_client = await client_rotator.get_client()
+
+    uploaded_chunks = []
+    chunk_counter = 1
+
+    # -------------------------------------------------------------------------
+    # TAHAP 1: POTONG DAN UNGGAH CHUNK (Hanya Sekali Jalan)
+    # -------------------------------------------------------------------------
+    for i in range(0, total_baris, CHUNK_SIZE):
+        df_chunk = df.iloc[i : i + CHUNK_SIZE]
+        
+        # Buat file CSV sementara secara lokal untuk diunggah
+        temp_chunk_path = f"temp_chunk_{chunk_counter}.csv"
+        df_chunk.to_csv(temp_chunk_path, index=False)
+        
+        try:
+            print(f"    [-] Mengunggah Chunk ke-{chunk_counter} ({len(df_chunk)} baris) ke AI Storage...")
+            # Proses unggah file ke Google AI Storage
+            file_ref = current_client.files.upload(
+                file=temp_chunk_path,
+                config=types.UploadFileConfig(mime_type="text/csv")
+            )
+            # Simpan referensi file cloud untuk dipakai di loop prompt nanti
+            uploaded_chunks.append(file_ref)
+            
+        except Exception as e:
+            print(f"    [!] Gagal mengunggah chunk ke-{chunk_counter}: {e}")
+        finally:
+            # Hapus file CSV sementara yang ada di laptop Anda
+            if os.path.exists(temp_chunk_path):
+                os.remove(temp_chunk_path)
+                
+        chunk_counter += 1
+
+    if not uploaded_chunks:
+        print("[!] Tidak ada chunk data yang berhasil diunggah. Proses dibatalkan.")
+        return
+
+    # -------------------------------------------------------------------------
+    # TAHAP 2: EKSEKUSI PROMPTS_DATA MENGGUNAKAN FILE CLOUD YANG SAMA
+    # -------------------------------------------------------------------------
     for prompt_key, prompt_text in prompts_data.items():
-        print(f"[-] Menjalankan AI untuk Prompt: '{prompt_key}'...")
+        print(f"\n[-] Menjalankan AI untuk Prompt: '{prompt_key}'...")
         
         hasil_parsial_prompt = []
-        chunk_counter = 1
         
-        for i in range(0, total_baris, CHUNK_SIZE):
-            df_chunk = df.iloc[i : i + CHUNK_SIZE]
-            
-            csv_buffer = io.StringIO()
-            df_chunk.to_csv(csv_buffer, index=False)
-            csv_string_chunk = csv_buffer.getvalue()
-            
-            print(f"    [-] Memproses Chunk ke-{chunk_counter} ({len(df_chunk)} baris)...")
+        for idx, file_ref in enumerate(uploaded_chunks):
+            batch_num = idx + 1
+            print(f"    [-] Memproses Cloud Chunk ke-{batch_num}...")
             
             prompt_lengkap = f"{prompt_text}\n\n{prompt_dasar_format}"
             
-            respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, csv_string_chunk)
+            # [PANGGIL FUNGSI ASLI ANDA] Melemparkan file_ref langsung ke fungsi inline Anda
+            respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, file_ref)
             
             if respons_ai:
-                hasil_parsial_prompt.append(f"--- ANALISIS DATA BATCH {chunk_counter} ---\n{respons_ai}")
+                hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n{respons_ai}")
             else:
-                hasil_parsial_prompt.append(f"--- ANALISIS DATA BATCH {chunk_counter} ---\n[AI Gagal Merespons]")
-            
-            chunk_counter += 1 
+                hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n[AI Gagal Merespons]")
         
-        # 1. GABUNGKAN HASIL FULL DARI SEMUA CHUNK UNTUK PROMPT INI
-        analisis_akhir_prompt = "\n\n".join(hasil_parsial_prompt)
-
-        # 2. SIAPKAN VARIABEL UNTUK HEADER (Pastikan variabel ini sudah didefinisikan sebelumnya di program Anda)
-        # Contoh jika mengambil waktu lokal saat ini:
+        # 3. GABUNGKAN HASIL & KIRIM KE TELEGRAM PER PROMPT
+        analisis_akhir_prompt = "\n\n────────────────────\n\n".join(hasil_parsial_prompt)
+        
         tz_jkt = pytz.timezone('Asia/Jakarta')
         waktu_sekarang = datetime.now(tz_jkt)
-        tanggal_kirim_indo = waktu_sekarang.strftime("%A, %d %B %Y") # Sesuaikan format teks lokal jika perlu
+        tanggal_kirim_indo = waktu_sekarang.strftime("%A, %d %B %Y")
         waktu_wib_realtime = waktu_sekarang.strftime("%H:%M:%S WIB")
-        nama_bersih = prompt_key.replace("_", " ").title() # Mengubah PROMPT_RANGKUMAN_BERITA menjadi Prompt Rangkuman Berita
+        nama_bersih = prompt_key.replace("_", " ").title()
         
         header_pesan = (
             f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
@@ -932,7 +979,17 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
 
         print(f"[+] Selesai memproses dan mengirim Prompt: '{prompt_key}' ke Telegram.\n")
 
-    print("[+] Seluruh proses analisis berita selesai dengan metode Large Chunking!")
+    # -------------------------------------------------------------------------
+    # TAHAP 3: BERSIHKAN FILE DI AI STORAGE (Housekeeping)
+    # -------------------------------------------------------------------------
+    print("[-] Membersihkan semua berkas chunk dari Google AI Storage...")
+    for file_ref in uploaded_chunks:
+        try:
+            current_client.files.delete(name=file_ref.name)
+        except Exception as e:
+            print(f"    [!] Gagal menghapus {file_ref.name}: {e}")
+
+    print("[+] Seluruh proses unggah, analisis, dan pembersihan selesai dengan sukses!")
 
 # ==========================================
 # PARALLEL SCRAPER PER SITE
