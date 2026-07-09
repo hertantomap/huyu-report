@@ -1,6 +1,7 @@
 import asyncio
 import time
 import random
+import string
 import csv
 import io
 import re
@@ -19,6 +20,9 @@ from google import genai
 from google.genai import types
 from firecrawl import Firecrawl
 import feedparser 
+# Tambahkan import ini di bagian atas main.py
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 # Memuat variabel dari file .env
 load_dotenv()
@@ -32,6 +36,39 @@ GEMINI_API_KEY_1 = os.getenv("GEMINI_API_KEY_1")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
 GEMINI_API_KEY_3 = os.getenv("GEMINI_API_KEY_3")
 
+# =====================================================================
+# INISIALISASI GOOGLE SHEETS API
+# =====================================================================
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+def inisialisasi_sheets_client_from_env():
+    client_email = os.getenv("GOOGLE_CLIENT_EMAIL")
+    private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+    
+    if not client_email or not private_key:
+        print("[!] Kredensial GOOGLE_CLIENT_EMAIL atau GOOGLE_PRIVATE_KEY tidak ditemukan di .env")
+        return None
+        
+    formatted_private_key = private_key.replace('\\n', '\n')
+    
+    info = {
+        "type": "service_account",
+        "client_email": client_email,
+        "private_key": formatted_private_key,
+        "token_uri": "https://oauth2.googleapis.com/token"
+    }
+    
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    service = build('sheets', 'v4', credentials=creds)
+    return service.spreadsheets()
+
+try:
+    sheets_client = inisialisasi_sheets_client_from_env()
+except Exception as e:
+    print(f"[!] Gagal inisialisasi Google Sheets API: {e}")
+    sheets_client = None
+
+
 # Masukkan ke dalam list dan abaikan yang kosong (jika sewaktu-waktu Anda hanya pakai 2 key)
 api_keys = [k for k in [GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3] if k]
 
@@ -43,18 +80,20 @@ clients = [genai.Client(api_key=key) for key in api_keys]
 
 # Class untuk merotasi pemakaian client (Round-Robin) secara aman (thread-safe)
 class ClientRotator:
-    def __init__(self, clients_list):
-        self.clients = clients_list
+    def __init__(self, api_keys):
+        self.api_keys = api_keys
+        # Ubah menjadi pasangan tuple: (objek_client, string_api_key_asli)
+        self.clients = [(genai.Client(api_key=key), key) for key in api_keys]
         self.index = 0
-        self.lock = asyncio.Lock()
 
     async def get_client(self):
-        async with self.lock:
-            c = self.clients[self.index]
-            self.index = (self.index + 1) % len(self.clients)
-            return c
+        if not self.clients:
+            return None, None
+        client_obj, api_key = self.clients[self.index]
+        self.index = (self.index + 1) % len(self.clients)
+        return client_obj, api_key # Kembalikan berpasangan
 
-client_rotator = ClientRotator(clients)
+client_rotator = ClientRotator(api_keys)
 
 # =====================================================================
 # SYSTEM SMART RATE LIMITER
@@ -131,51 +170,14 @@ async def fetch_dynamic_config(url, max_retries=3, retry_delay=5):
 # ==========================================
 # FUNGSI 1: FILTER LINK DENGAN ENGINE GEMINI
 # ==========================================
-async def filter_links_with_gemini(prompt, csv_string):
+async def process_task_with_gemini(prompt, csv_string):
     print("    [-] Kuota terverifikasi. Mengirim request filter link ke Gemini...")
     
     models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
     data_csv_mentah = csv_string.encode('utf-8')
     
-    current_client = await client_rotator.get_client() # Ambil giliran client
+    current_client, current_api_key = await client_rotator.get_client() # Ambil giliran client
     
-    for model_name in models_fallback_order:
-        await gemini_limiter.acquire()
-        
-        try:
-            print(f"    [-] Mencoba memfilter konten berita menggunakan model Async: {model_name}...")
-            komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
-            generate_content_config = types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
-            )
-            
-            # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
-            response = await current_client.aio.models.generate_content(
-                model=model_name,
-                contents=[komponen_csv, prompt],
-                config=generate_content_config
-            )
-            
-            if response and response.text:
-                return response.text
-                
-        except Exception as e:
-            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
-
-    print("    [!] Semua model untuk Ekstraksi Konten gagal merespons pada API Key ini.")
-    return ""
-
-# ==========================================
-# FUNGSI 2: FILTER CONTENT BERITA DENGAN ENGINE GEMINI
-# ==========================================
-async def extract_content_with_gemini(prompt, csv_string):
-    print("    [-] Kuota terverifikasi. Mengirim request filter konten berita ke Gemini...")
-    
-    models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
-    data_csv_mentah = csv_string.encode('utf-8')
-    
-    current_client = await client_rotator.get_client() # Ambil giliran client
-
     for model_name in models_fallback_order:
         await gemini_limiter.acquire()
         
@@ -207,16 +209,15 @@ async def extract_content_with_gemini(prompt, csv_string):
 # ==========================================
 async def ask_gemini_with_inline_csv(prompt, csv_data):
     """
-    Fungsi Async Gemini dengan Fallback.
-    Mendukung rotasi penuh 3 API Key menggunakan dictionary mapping file cloud.
+    Fungsi Async Gemini dengan Fallback mendukung peninjauan key aktif via Client Rotator Tuple.
     """
     models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it']
     
     for model_name in models_fallback_order:
         await gemini_limiter.acquire()
         
-        # Ambil client aktif saat ini (Rotasi berjalan normal di setiap model)
-        current_client = await client_rotator.get_client()
+        # Dapatkan index saat ini SEBELUM get_client() merotasi nilainya
+        current_client, current_api_key = await client_rotator.get_client() 
         
         try:
             print(f"    [-] Mencoba menganalisis data menggunakan model Async: {model_name}...")
@@ -225,8 +226,7 @@ async def ask_gemini_with_inline_csv(prompt, csv_data):
                 data_csv_mentah = csv_data.encode('utf-8')
                 komponen_input = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
             elif isinstance(csv_data, dict):
-                # Ambil referensi file cloud yang sesuai dengan API Key client aktif saat ini
-                current_api_key = current_client.api_key
+                # Cari file_ref cloud berdasarkan string key aktif saat ini
                 if current_api_key in csv_data:
                     komponen_input = csv_data[current_api_key]
                 else:
@@ -287,13 +287,15 @@ async def saham_lq45_terbaik_idx():
         json_data = json.loads(raw_json_str)
         data_saham = json_data.get('data', [])
     except json.JSONDecodeError:
-        # Jika teksnya masih terbungkus tag HTML (seperti <html><body>{...}</body></html>)
-        # Kita bersihkan sedikit menggunakan replace atau string manipulation dasar
         try:
-            # Membersihkan tag HTML sederhana jika ada yang ikut terbawa
-            clean_json = raw_json_str.split('<body>')[-1].split('</body>')[0].strip()
-            json_data = json.loads(clean_json)
-            data_saham = json_data.get('data', [])
+            # Gunakan Regex untuk mengekstrak struktur JSON (tanda kurawal) terlepas dari ada/tidaknya tag HTML
+            match = re.search(r'\{.*\}', raw_json_str, re.DOTALL)
+            if match:
+                clean_json = match.group(0)
+                json_data = json.loads(clean_json)
+                data_saham = json_data.get('data', [])
+            else:
+                return None
         except Exception as e:
             print("Gagal parsing JSON. Teks mentah yang diterima:")
             print(raw_json_str)
@@ -597,6 +599,9 @@ async def fetch_yahoo_finance_news_urls(ticker_code="BTC-USD"):
 # =====================================================================
 # FUNGSI NOTIFIKASI TELEGRAM (AUTO-SPLIT JIKA LEBIH DARI 4000 KARAKTER)
 # =====================================================================
+# =====================================================================
+# FUNGSI NOTIFIKASI TELEGRAM (DENGAN RETRY & TIMEOUT LEBIH TINGGI)
+# =====================================================================
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
@@ -653,61 +658,54 @@ def send_telegram_message(text):
         if current_chunk:
             chunks.append("\n".join(current_chunk))
         return chunks
-
-    # Jalankan pembersihan awal
+    
+    # 1. Pembersihan & Pemotongan Teks (Tetap sama)
     cleaned_text = fix_markdown_leak(text)
     safe_text = escape_html(cleaned_text)
-
-    # Bagi teks menjadi beberapa potongan jika melebihi batas
     pesan_potongan = split_text_chunks(safe_text, max_chunk_size=3800)
     total_bagian = len(pesan_potongan)
-
-    # Loop untuk mengirim setiap potongan pesan
+    
+    # 2. Loop untuk mengirim setiap potongan
     for i, chunk in enumerate(pesan_potongan):
-        # Tambahkan indikator halaman di akhir jika pesan terbagi (Contoh: [Bagian 1/3])
         text_payload = chunk
         if total_bagian > 1:
             text_payload += f"\n\n<i>[Bagian {i + 1}/{total_bagian}]</i>"
-
+            
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text_payload,
             "parse_mode": "HTML"
         }
-        
         data = urllib.parse.urlencode(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         
-        try:
-            with urllib.request.urlopen(req, timeout=12) as response:
-                print(f"    [+] Potongan pesan {i + 1}/{total_bagian} sukses terkirim.")
-                response.read() # Selesaikan pembacaan stream
-        except Exception as e:
-            print(f"    [!] Gagal mengirim potongan {i + 1} dengan format HTML: {e}")
-            
-            # SEKOCI PENYELAMAT: Kirim sebagai teks biasa tanpa format jika HTML internalnya masih error
+        # [PERBAIKAN]: Tambahkan mekanisme retry
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
             try:
-                print("    [!] Mencoba mengirim ulang bagian ini sebagai Plain Text...")
-                plain_chunk = re.sub(r'<[^>]*>', '', chunk)
-                plain_text_fallback = plain_chunk[:3500] + f"\n\n[Mode teks biasa - Bagian {i + 1}/{total_bagian}]"
-                payload_fallback = {
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": plain_text_fallback,
-                    "parse_mode": "" 
-                }
-                data_retry = urllib.parse.urlencode(payload_fallback).encode("utf-8")
-                req_retry = urllib.request.Request(url, data=data_retry, method="POST")
-                with urllib.request.urlopen(req_retry, timeout=12) as resp_retry:
-                    resp_retry.read()
-                    print(f"[+] Sukses mengirimkan laporan darurat teks biasa untuk bagian {i + 1}.")
-            except Exception as retry_err:
-                print(f"    [!] Pengiriman cadangan gagal total: {retry_err}")
-
-        # Berikan jeda singkat 1,5 detik antar-potongan pesan agar mematuhi batasan spamming Telegram
-        if total_bagian > 1 and i < total_bagian - 1:
-            time.sleep(1.5)
-
-    return "Proses pengiriman selesai"
+                # [PERBAIKAN]: Timeout dinaikkan menjadi 45 detik untuk menangani handshake yang lambat
+                with urllib.request.urlopen(req, timeout=45) as response:
+                    print(f" [+] Potongan pesan {i + 1}/{total_bagian} sukses terkirim.")
+                    break # Keluar dari loop retry jika sukses
+            except Exception as e:
+                print(f" [!] Gagal kirim potongan {i + 1} (Percobaan {attempt}): {e}")
+                if attempt < max_retries:
+                    time.sleep(5) # Tunggu 5 detik sebelum mencoba lagi
+                else:
+                    # Gagal setelah 3 kali, coba fallback ke teks biasa
+                    print(f" [!] Mencoba kirim sebagai Plain Text...")
+                    try:
+                        plain_chunk = re.sub(r'<[^>]*>', '', chunk)
+                        payload_fallback = {
+                            "chat_id": TELEGRAM_CHAT_ID,
+                            "text": plain_chunk[:3500],
+                            "parse_mode": "" # Tanpa HTML
+                        }
+                        data_fb = urllib.parse.urlencode(payload_fallback).encode("utf-8")
+                        urllib.request.urlopen(urllib.request.Request(url, data=data_fb, method="POST"), timeout=45)
+                        print(" [+] Pengiriman fallback sukses.")
+                    except Exception as e_fb:
+                        print(f" [!] Pengiriman cadangan gagal: {e_fb}")
 
 # ==========================================
 # FUNGSI PEMBANTU BROWSER
@@ -878,6 +876,8 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
     - Menjalankan rotasi key penuh saat pemrosesan prompt.
     - Mengirim pesan ke Telegram dengan proteksi splitter 4096 karakter.
     """
+    hasil_ekspor_ai = None # Siapkan variabel untuk menyimpan respons
+    
     if not os.path.exists(master_file_name):
         print(f"[!] File master {master_file_name} tidak ditemukan. Analisis dibatalkan.")
         return
@@ -893,7 +893,7 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         print("[!] File CSV kosong. Tidak ada data untuk dianalisis.")
         return
 
-    CHUNK_SIZE = 220 
+    CHUNK_SIZE = 200 
     
     print(f"\n==================================================")
     print(f"[9] MEMULAI PROSES MULTI-KEY UPLOAD DAN ANALISIS BERITA")
@@ -917,12 +917,12 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         
         chunk_key_mapping = {}
         print(f"    [-] Menyiapkan Chunk ke-{chunk_counter} ({len(df_chunk)} baris)...")
-        
+
         # Upload file chunk yang sama ke setiap API Key
-        for client in semua_client:
+        for client, api_key_str in semua_client:
+            masked_key = f"...{api_key_str[-6:]}" if api_key_str else "Unknown"
+
             try:
-                # Masking API Key untuk log agar tetap aman
-                masked_key = f"...{client.api_key[-6:]}" if client.api_key else "Unknown"
                 print(f"        [-] Mengunggah ke Cloud Storage untuk Key {masked_key}...")
                 
                 file_ref = client.files.upload(
@@ -930,7 +930,7 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
                     config=types.UploadFileConfig(mime_type="text/csv")
                 )
                 # Petakan referensi file ke string API Key-nya
-                chunk_key_mapping[client.api_key] = file_ref
+                chunk_key_mapping[api_key_str] = file_ref
             except Exception as e:
                 print(f"        [!] Gagal mengunggah untuk Key {masked_key}: {e}")
         
@@ -950,6 +950,9 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
     # TAHAP 2: EKSEKUSI PROMPTS MENGGUNAKAN ROTASI API KEY PENUH
     # -------------------------------------------------------------------------
     for prompt_key, prompt_text in prompts_data.items():
+        if prompt_key == "PROMPT_DASAR_FORMAT":
+            continue
+        
         print(f"\n[-] Menjalankan AI untuk Prompt: '{prompt_key}'...")
         hasil_parsial_prompt = []
         
@@ -964,6 +967,10 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
             
             if respons_ai:
                 hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n{respons_ai}")
+                
+                # [TAMBAHKAN LOGIKA INI]
+                if prompt_key == "PROMPT_BISNIS_EKSPOR":
+                    hasil_ekspor_ai = respons_ai
             else:
                 hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n[AI Gagal Merespons]")
         
@@ -976,7 +983,10 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         waktu_sekarang = datetime.now(tz_jkt)
         tanggal_kirim_indo = waktu_sekarang.strftime("%A, %d %B %Y")
         waktu_wib_realtime = waktu_sekarang.strftime("%H:%M:%S WIB")
-        nama_bersih = prompt_key.replace("_", " ").title()
+        nama_bersih = prompt_key.replace("_", " ")
+        if nama_bersih.startswith("PROMPT "):
+            nama_bersih = nama_bersih.replace("PROMPT ", "", 1)
+        
         
         header_pesan = (
             f"📌 <code>{tanggal_kirim_indo} pukul {waktu_wib_realtime}</code>\n"
@@ -996,15 +1006,536 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
     # -------------------------------------------------------------------------
     print("[-] Membersihkan semua berkas chunk dari Google AI Storage (Seluruh Key)...")
     for chunk_map in uploaded_chunks_map:
-        for client in semua_client:
-            if client.api_key in chunk_map:
+        for client, api_key_str in semua_client:
+            if api_key_str and api_key_str in chunk_map:
                 try:
-                    file_ref = chunk_map[client.api_key]
+                    file_ref = chunk_map[api_key_str]
                     client.files.delete(name=file_ref.name)
                 except Exception as e:
                     pass
 
     print("[+] Seluruh proses unggah, analisis, dan pembersihan selesai dengan sukses!")
+
+    return hasil_ekspor_ai
+
+async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_name, data_respons_ai):
+    if not sheets_client:
+        print("[!] Client Google Sheets tidak aktif. Proses dihentikan.")
+        return
+
+    if not data_respons_ai or not data_respons_ai.strip():
+        print("[!] Data data_respons_ai kosong. Proses dilewati.")
+        return
+
+    print(f"\n──────────────────────────────────────")
+    print(f"[-] MEMULAI PROSES STRUKTURISASI DATA VIA GEMINI FILE API")
+    print(f"──────────────────────────────────────")
+
+    # 1. Buat file teks sementara secara lokal berisi narasi respons_ai
+    temp_txt_file = "temp_ekspor_report.txt"
+    try:
+        def tulis_file_lokal():
+            with open(temp_txt_file, "w", encoding="utf-8") as f:
+                f.write(data_respons_ai)
+        await asyncio.to_thread(tulis_file_lokal)
+        print("[-] Berhasil menulis laporan narasi ke file lokal sementara.")
+    except Exception as e:
+        print(f"[!] Gagal membuat file teks lokal: {e}")
+        return
+
+    idx_sekarang = client_rotator.index
+    current_client, current_api_key = await client_rotator.get_client()
+    _, current_api_key = client_rotator.clients[idx_sekarang]
+    
+    uploaded_file = None
+    response_text = ""
+
+    try:
+        # 2. Unggah file narasi tersebut ke Gemini File API cloud
+        def upload_ke_gemini_cloud():
+            return current_client.files.upload(
+                file=temp_txt_file,
+                config=types.UploadFileConfig(mime_type="text/plain")
+            )
+        
+        uploaded_file = await asyncio.to_thread(upload_ke_gemini_cloud)
+        print(f"[+] File narasi berhasil diunggah ke Gemini Cloud. URI: {uploaded_file.uri}")
+
+        # 3. Definisikan PROMPT khusus yang mendeskripsikan isi File Teks Perdagangan tersebut
+        prompt_ekstraksi = """
+        Bertindaklah sebagai Ahli Data Perdagangan Internasional.
+        Tugas Anda adalah memetakan arus aktivitas Ekspor dan Impor BARANG/KOMODITAS FISIK nyata dari dokumen file teks laporan rangkuman ekspor yang dilampirkan ke dalam format JSON.
+        
+        ATURAN STRATEGIS UTAMA (WAJIB DIPATUHI - PENYARINGAN KETAT):
+        1. Anda HANYA BOLEH mengekstrak informasi yang membahas perdagangan, transaksi, kebutuhan atau potensi komoditas/barang fisik LINTAS NEGARA (Ekspor-Impor, Kesepakatan Bilateral).
+
+        PANDUAN KECERDASAN MULTI-ENTITAS (DEMAND & SUPPLY SPLITTING):
+        - Dokumen ini berisi rangkuman berita ekspor-impor. Jika sebuah berita membahas pergeseran pasar atau transaksi yang melibatkan banyak pihak, Anda WAJIB memecahnya menjadi beberapa objek JSON terpisah berdasarkan perannya:
+          * Sisi 'Demand': Negara/pihak yang membutuhkan, membeli, atau mengimpor komoditas.
+          * Sisi 'Supply': Negara/pihak yang menyediakan, menjual, atau mengekspor komoditas.
+        - Analisis kalimat secara mendalam: Jika satu negara mengalihkan pembelian dari Negara A ke Negara B, maka akan muncul 3 objek: 1 Demand (negara pembeli) dan 2 Supply (Negara A sebagai pemasok lama/berkurang, Negara B sebagai pemasok baru).
+
+        CONTOH LOGIKA EKSTRAKSI (IKUTI POLA PIKIR INI):
+        Teks: "Industri manufaktur kemasan plastik nasional mengalihkan pasokan biji plastik dan nafta dari Timur Tengah ke regional ASEAN dan China akibat disrupsi rantai pasok..."
+        Hasil Ekstraksi Harus Menghasilkan 3 Objek JSON:
+        1. Negara: Indonesia (Jakarta) -> Status_Pasar: Demand (Karena industri nasional membutuhkan komoditas)
+        2. Negara: Timur Tengah -> Status_Pasar: Supply (Karena merupakan asal pasokan awal)
+        3. Negara: China -> Status_Pasar: Supply (Karena menjadi tujuan pengalihan pasokan baru)
+
+        Instruksi Pengisian Bidang JSON (Hasilkan Array of Objects):
+        1. 'tanggal': Berikan tanggal hari ini (Format: Kamis, 9 Juli 2026).
+        2. 'isi_berita_ringkas': Ringkasan inti dari dinamika ekspor komoditas tersebut (maksimal 2-5 kalimat).
+        3. 'sumber_berita': Ambil dari tanda kurung siku di akhir paragraf (contoh dari '[Tempo, Bisnis]' menjadi 'Tempo, Bisnis'). Jika tidak ada, isi "-".
+        4. 'komoditas': Nama komoditas/barang fisik utama (contoh: "Biji Plastik dan Nafta").
+        5. 'status_pasar': Hanya boleh diisi 'Supply' atau 'Demand'.
+        6. 'negara': Nama negara pelaku.
+        7. 'kota': Nama kota yang disebutkan, jika tidak ada tulis nama Ibu Kota negara tersebut atau "-".
+        8. 'latitude': Koordinat perkiraan garis lintang (latitude) dari negara/kota tersebut.
+        9. 'longitude': Koordinat perkiraan garis bujur (longitude) dari negara/kota tersebut.
+        10. 'analisis_makro': Analisis ringkas mengenai peluang, tarif, fluktuasi harga global atau regulasi komoditas tersebut sesuai teks dokumen.
+        """
+
+        # Skema Output JSON Array untuk Google Sheets (10 Kolom data olahan)
+        schema_ekstraksi = types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "tanggal": types.Schema(type=types.Type.STRING),
+                    "isi_berita_ringkas": types.Schema(type=types.Type.STRING),
+                    "sumber_berita": types.Schema(type=types.Type.STRING),
+                    "komoditas": types.Schema(type=types.Type.STRING),
+                    "status_pasar": types.Schema(type=types.Type.STRING),
+                    "negara": types.Schema(type=types.Type.STRING),
+                    "kota": types.Schema(type=types.Type.STRING),
+                    "latitude": types.Schema(type=types.Type.STRING),
+                    "longitude": types.Schema(type=types.Type.STRING),
+                    "analisis_makro": types.Schema(type=types.Type.STRING),
+                },
+                required=[
+                    "tanggal", "isi_berita_ringkas", "sumber_berita", "komoditas",
+                    "status_pasar", "negara", "kota", "latitude", "longitude", "analisis_makro"
+                ]
+            )
+        )
+
+        models_fallback_order = ['gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
+
+        # 4. Kirim referensi file cloud (uploaded_file) beserta prompt ke Gemini
+        for model_name in models_fallback_order:
+            await gemini_limiter.acquire()
+            try:
+                print(f"[-] Mengekstrak data menggunakan model: {model_name}...")
+                response = await current_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=[uploaded_file, prompt_ekstraksi],  # <--- Menggunakan objek File API cloud
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema_ekstraksi
+                    )
+                )
+                if response and response.text:
+                    response_text = response.text.strip()
+                    break
+            except Exception as e:
+                print(f"        [!] Model {model_name} Gagal/Timeout: {e}. Mengajukan fallback...")
+
+    finally:
+        # PEMBERSIHAN MUTLAK: Selalu hapus file lokal dan file cloud dari sistem Gemini agar hemat ruang
+        if os.path.exists(temp_txt_file):
+            try:
+                os.remove(temp_txt_file)
+                print("[-] Berhasil membersihkan file lokal sementara.")
+            except:
+                pass
+        
+        if uploaded_file:
+            try:
+                def delete_cloud_file():
+                    current_client.files.delete(name=uploaded_file.name)
+                await asyncio.to_thread(delete_cloud_file)
+                print("[-] Berhasil menghapus file dari storage Gemini Cloud.")
+            except Exception as clear_err:
+                print(f"[!] Gagal menghapus file cloud: {clear_err}")
+
+    if not response_text:
+        print("[!] Gagal menstrukturkan data lewat AI Fallback File API.")
+        return
+
+    # 5. Parsing Hasil JSON Array dan masukkan ke format baris Google Sheets
+    values_to_append = []
+
+    try:
+        match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        if match: 
+            response_text = match.group(0)
+
+        clean_json = re.sub(r'```json|```', '', response_text).strip()
+        data_rows = json.loads(clean_json)
+
+        for item in data_rows:
+            lat = item.get("latitude", "0")
+            lon = item.get("longitude", "0")
+            url_maps = f"https://www.google.com/maps?q={lat},{lon}"
+            
+            # Susun kolom rapi untuk baris Spreadsheet Anda
+            row_data = [
+                item.get("tanggal", "-"),
+                item.get("isi_berita_ringkas", ""),
+                item.get("sumber_berita", ""),
+                item.get("komoditas", "").title(),
+                item.get("status_pasar", "").strip().capitalize(),
+                item.get("negara", ""),
+                item.get("kota", ""),
+                url_maps,
+                lat,
+                lon,
+                item.get("analisis_makro", "")
+            ]
+            values_to_append.append(row_data)
+
+        # 6. Push Data Hasil Olahan ke Google Sheets API
+        if values_to_append:
+            def append_to_sheets():
+                body = {'values': values_to_append}
+                sheets_client.values().append(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"{sheet_name}!A:A",
+                    valueInputOption="USER_ENTERED",
+                    body=body
+                ).execute()
+
+            await asyncio.to_thread(append_to_sheets)
+            print(f"[+] BERHASIL: Menyimpan {len(values_to_append)} data dari File API laporan ekspor ke Google Sheets!")
+        else:
+            print("[-] Tidak ada data tabel valid yang berhasil diekstrak.")
+        
+    except Exception as err:
+        print(f"[!] Kendala saat parsing JSON atau pengiriman ke Google Sheets: {err}")
+
+    return data_rows
+
+async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_sheet_name="Data Utama"):
+    if not sheets_client:
+        print("[!] Client Google Sheets tidak aktif. Proses dibatalkan.")
+        return
+
+    print(f"\n──────────────────────────────────────")
+    print(f"[-] MEMULAI PROSES GOOGLE MAPS WEB SCRAPER (NO API KEY REQUIRED)")
+    print(f"──────────────────────────────────────")
+
+    current_client, current_api_key = await client_rotator.get_client()
+    valid_items_to_analyze = []
+    temp_leads_file = f"temp_leads_to_analyze_{int(time.time())}.csv"
+    
+    try:
+        def create_temp_leads_csv():
+            lookup_items = []
+            with open(temp_leads_file, 'w', encoding='utf-8', newline='') as f_out:
+                writer = csv.writer(f_out)
+                writer.writerow(["ID_Entitas", "Komoditas", "Status_Pasar", "Kota", "Negara"])
+                counter = 1
+                for entitas in data_entitas_ai:
+                    komoditas = entitas.get("komoditas", "").strip()
+                    status_pasar = entitas.get("status_pasar", "").strip()
+                    negara = entitas.get("negara", "").strip()
+                    kota = entitas.get("kota", "").strip()
+                    analisis_makro = entitas.get("analisis_makro", "").strip()
+                    
+                    if not komoditas or not status_pasar: continue
+                    writer.writerow([counter, komoditas, status_pasar, kota, negara])
+                    
+                    lookup_items.append({
+                        "id_entitas": counter,
+                        "komoditas": komoditas.title(),
+                        "stakeholder": "Pembeli" if status_pasar.lower() == "demand" else "Supplier",
+                        "negara": negara,
+                        "kota": kota,
+                        "analisis_makro": analisis_makro,
+                    })
+                    counter += 1
+            return lookup_items
+        valid_items_to_analyze = await asyncio.to_thread(create_temp_leads_csv)
+    except Exception as err:
+        print(f"[!] Gagal mempersiapkan file CSV lokal: {err}")
+        return
+
+    uploaded_leads_file = None
+    queries_lookup = {}
+
+    try:
+        def upload_leads_to_ai():
+            return current_client.files.upload(file=temp_leads_file, config=types.UploadFileConfig(mime_type="text/csv"))
+        uploaded_leads_file = await asyncio.to_thread(upload_leads_to_ai)
+
+        # 2. PROMPT BATCH AI: MERUMUSKAN 3 TIER KUERI GOOGLE MAPS BERDASARKAN SKALA BISNIS
+        prompt_batch_query = """
+        Bertindaklah sebagai B2B Lead Generation Specialist & Market Intelligence Internasional.
+        Tugas Anda adalah merumuskan TIGA (3) kueri pencarian lokal spesifik (Bahasa Inggris) untuk dimasukkan ke Google Maps berdasarkan file CSV yang dilampirkan.
+
+        TARGET STRATEGI STRUKTUR TIER KUERI (WAJIB PATUH):
+        - Jika 'Status_Pasar' bernilai 'Demand' (Pembeli), pecah kueri berdasarkan 3 tingkatan skala bisnis dari kecil ke besar:
+          * Kueri 1 (Tier 1 - Skala Kecil / Konsumen Ritel Komersial): Fokus mencari bisnis pengguna akhir yang langsung menyerap produk (contoh: Kafe, Roastery lokal, Bakery, Restoran lokal, atau Toko kue).
+          * Kueri 2 (Tier 2 - Skala Menengah / Grosir & Distributor): Fokus mencari rantai distribusi tengah (contoh: B2B Wholesaler, local supplier, distributor bahan baku kue/kopi, atau agen komoditas lokal).
+          * Kueri 3 (Tier 3 - Skala Besar / Importir & Industri Manufaktur): Fokus mencari penyerap volume masif (contoh: Main Importer, Trading House internasional, pabrik pengolahan makanan/minuman/F&B factory, atau jaringan hotel & catering skala besar).
+          
+        - Jika 'Status_Pasar' bernilai 'Supply' (Supplier), pecah kueri berdasarkan tingkatan pasokan:
+          * Kueri 1 (Tier 1 - Pengrajin/Produsen Kecil): Pembuat lokal, workshop, atau asosiasi petani lokal.
+          * Kueri 2 (Tier 2 - Pabrik/Supplier Menengah): Supplier B2B lokal, pabrikasi wilayah, atau processing mill menengah.
+          * Kueri 3 (Tier 3 - Pabrik Besar/Eksportir Utama): Pabrik manufaktur utama skala industri (Large Factory / Manufacturer) atau Perusahaan perdagangan ekspor (Export Trading House / Active Exporter).
+
+        Respons HARUS berupa JSON Array murni berisi list objek per id_entitas (tanpa markdown ```json, tanpa penjelasan teks pembuka/penutup):
+        [
+          {
+            "id_entitas": 1,
+            "search_targets": [
+              { "tipe_bisnis": "Konsumen Hilir (Cafe/Roastery)", "maps_search_query": "Specialty Coffee Cafe Kuala Lumpur" },
+              { "tipe_bisnis": "Distributor/Grosir", "maps_search_query": "Coffee Wholesaler Supplier Kuala Lumpur" },
+              { "tipe_bisnis": "Importir/Pabrik Besar", "maps_search_query": "Coffee Importer Processing Factory Malaysia" }
+            ]
+          }
+        ]
+        """
+        batch_query_schema = types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "id_entitas": types.Schema(type=types.Type.INTEGER),
+                    "search_targets": types.Schema(
+                        type=types.Type.ARRAY,
+                        items=types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "tipe_bisnis": types.Schema(type=types.Type.STRING),
+                                "maps_search_query": types.Schema(type=types.Type.STRING)
+                            },
+                            required=["tipe_bisnis", "maps_search_query"]
+                        )
+                    )
+                },
+                required=["id_entitas", "search_targets"]
+            )
+        )
+
+        models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it']
+        response_text = ""
+        for model_name in models_fallback_order:
+            await gemini_limiter.acquire()
+            try:
+                print(f"[-] Merumuskan perluasan kueri Google Maps dengan model: {model_name}...")
+                response = await current_client.aio.models.generate_content(
+                    model=model_name, contents=[uploaded_leads_file, prompt_batch_query],
+                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=batch_query_schema, temperature=0.1)
+                )
+                if response and response.text:
+                    response_text = response.text.strip()
+                    break
+            except Exception as e: pass
+
+        match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        if match: response_text = match.group(0)
+        parsed_queries = json.loads(response_text)
+        queries_lookup = {item["id_entitas"]: item["search_targets"] for item in parsed_queries}
+    except Exception as err:
+        print(f"[!] Gagal memproses File API: {err}")
+        return
+    finally:
+        if uploaded_leads_file:
+            try: current_client.files.delete(name=uploaded_leads_file.name)
+            except Exception: pass
+        if os.path.exists(temp_leads_file): os.remove(temp_leads_file)
+
+    # 3. LIVE GOOGLE MAPS WEB SCRAPING VIA PLAYWRIGHT
+    values_to_append = []
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled", "--no-sandbox"])
+        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36")
+        page = await context.new_page()
+
+        for item in valid_items_to_analyze:
+            search_targets = queries_lookup.get(item["id_entitas"], [])
+            
+            for target in search_targets:
+                maps_query = target.get("maps_search_query", "").strip()
+                tipe_bisnis_target = target.get("tipe_bisnis", "").strip()
+                if not maps_query: continue
+
+                print(f"    [*] Membuka Google Maps Web -> Kueri: '{maps_query}'...")
+                jumlah_per_kueri = 0  # Counter lokal untuk mencatat hasil per kueri spesifik
+
+                try:
+                    # Langsung tembak URL pencarian Google Maps Web resmi
+                    encoded_q = urllib.parse.quote_plus(maps_query)
+                    maps_url = f"https://www.google.com/maps/search/{encoded_q}?hl=id"
+                    
+                    await page.goto(maps_url, timeout=30000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(2000) # Tunggu Maps memproses rendering lokasi pin
+
+                    # Selektor kontainer sidebar kiri tempat list hasil Google Maps berada
+                    scrollable_sidebar_selector = "div[role='feed']"
+                    
+                    try:
+                        # Pastikan sidebar termuat terlebih dahulu
+                        await page.wait_for_selector(scrollable_sidebar_selector, timeout=20000)
+                        
+                        # Lakukan scroll sebanyak 4-5 kali ke bawah untuk memuat hingga 15-20 tempat usaha
+                        for scroll_step in range(4):
+                            # Arahkan mouse/pointer ke koordinat kontainer sidebar kiri
+                            sidebar_element = await page.query_selector(scrollable_sidebar_selector)
+                            if sidebar_element:
+                                # Mengambil bounding box kontainer untuk menentukan posisi tengah koordinat mouse
+                                box = await sidebar_element.bounding_box()
+                                if box:
+                                    # Pindahkan mouse ke tengah kontainer sidebar, lalu lakukan scroll wheel ke bawah
+                                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                    await page.mouse.wheel(0, 3000) # Scroll ke bawah sejauh 3000 pixel
+                            
+                            await page.wait_for_timeout(1500) # Jeda singkat menunggu data baru dimuat hulu
+                    except Exception as scroll_err:
+                        print(f"        [!] Peringatan kendala scrolling sidebar: {scroll_err}")
+                    
+                    # Ambil elemen kontainer tempat bisnis yang terdaftar di sidebar Google Maps (`div.Nv2y3c` atau `a.hfpxzc`)
+                    places_elements = await page.query_selector_all("a[href*='/maps/place/']")
+                    
+                    if not places_elements:
+                        print("        [?] Tautan lokasi fisik a[href*='/maps/place/'] belum termuat di sidebar.")
+                        continue
+                        
+                    print(f"        [+] Menemukan {len(places_elements)} profil bisnis terdaftar resmi. Mengekstrak data...")
+                    
+                    for link_element in places_elements: 
+                        # Ambil Atribut Nama (aria-label) dan URL Koordinat (href) langsung dari elemen utama yang pasti ada
+                        place_name = await link_element.get_attribute("aria-label")
+                        place_url = await link_element.get_attribute("href")
+                        
+                        if not place_name or not place_url:
+                            continue
+                            
+                        # Ekstrak data Koordinat Geografis langsung dari URL
+                        lat_val, lon_val = "0", "0"
+                        coord_match = re.search(r'!3d([-.\d]+)!4d([-.\d]+)', place_url)
+                        if coord_match:
+                            lat_val = coord_match.group(1)
+                            lon_val = coord_match.group(2)
+                            
+                        # =====================================================================
+                        # PROSES EKSTRAKSI KATEGORI VIA PARENT / ANCESTOR SCOPING
+                        # =====================================================================
+                        kategori_detail = tipe_bisnis_target 
+                        
+                        try:
+                            # Menggunakan XPath dari link_element untuk memanjat naik ke parent kontainer div[role='article']
+                            # lalu mencari komponen .fontBodyMedium teks kategori di dalamnya secara aman
+                            parent_article = await link_element.query_selector("xpath=ancestor::div[@role='article']")
+                            
+                            if parent_article:
+                                desc_element = await parent_article.query_selector(".fontBodyMedium div:nth-child(4) div:nth-child(1)")
+                                if desc_element:
+                                    text_kategori = await desc_element.inner_text()
+                                    if text_kategori and len(text_kategori.strip()) > 1:
+                                        kategori_detail = text_kategori.strip()
+                        except Exception:
+                            pass
+
+                        # Menghasilkan 4 karakter acak (contoh: 'X7R2')
+                        acak_4_char = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+                        id_unik = f"UD{acak_4_char}"  # Hasil akhir pasti 6 karakter (contoh: 'UDX7R2')
+
+                        # Simpan row data ke Data Utama
+                        row_data = [
+                            id_unik,                                      # ID
+                            str(item["stakeholder"]),                     # Stakeholder
+                            str(item["komoditas"]),                       # Komoditas
+                            str(place_name),                              # Nama Usaha Riil
+                            str(item["negara"]),                          # Negara
+                            str(item["kota"]),                            # Kota
+                            str(place_url),                               # Lokasi (Google Maps URL Riil)
+                            f"{lat_val}",                                 # Latitude
+                            f"{lon_val}",                                 # Longitude
+                            "",                                           # Whatsapp (Kosong)
+                            "",                                           # Website (Bisa dikosongkan/diisi dinamis)
+                            f"{kategori_detail}",                         # Deskripsi Singkat
+                            f"Profil Usaha Fisik Kategori ({kategori_detail}) Terdaftar Resmi di Google Maps wilayah {item['kota']}, {item['negara']}." # Deskripsi Lengkap
+                        ]
+                        values_to_append.append(row_data)
+                        jumlah_per_kueri += 1
+
+                    print(f"        [√] Sukses mengekstrak {jumlah_per_kueri} profil untuk kueri ini.")
+                    
+                except Exception as maps_err:
+                    print(f"        [!] Gagal scraping Google Maps Web pada kueri ini: {maps_err}")
+                    continue
+                    
+                await page.wait_for_timeout(2000) # Jeda aman anti-bot
+
+        await browser.close()
+
+    # 4. PUSH DATA BERSIH KE GOOGLE SPREADSHEET
+    # Asumsikan 'values_to_append' adalah list berisi baris-baris data akhir yang siap ditulis.
+    # Jika tidak ada data, langsung lewati.
+    if not values_to_append:
+        print("[!] Tidak ada profil toko fisik/leads yang berhasil lolos filter untuk ditulis.")
+        return
+
+    # =====================================================================
+    # LOGIKA BARU: CHUNKING & RETRY UNTUK GOOGLE SHEETS
+    # =====================================================================
+    CHUNK_SIZE = 50       # Jumlah baris maksimal per 1x request (Bisa diatur ulang 50-100)
+    MAX_RETRIES = 3       # Maksimal percobaan ulang jika gagal
+    RETRY_DELAY = 5       # Jeda waktu (detik) sebelum mengulang
+    
+    total_data = len(values_to_append)
+    print(f"\n[-] Memulai penyimpanan {total_data} leads ke Spreadsheet '{target_sheet_name}'...")
+    print(f"[-] Sistem akan memecah pengiriman menjadi batch berukuran {CHUNK_SIZE} baris.")
+
+    total_baris_berhasil = 0
+
+    # Pecah list utama 'values_to_append' menjadi potongan-potongan kecil (chunk)
+    for i in range(0, total_data, CHUNK_SIZE):
+        chunk = values_to_append[i:i + CHUNK_SIZE]
+        batch_num = (i // CHUNK_SIZE) + 1
+        
+        # Fungsi pembantu lokal untuk menulis 1 chunk ke Google Sheets
+        def append_chunk_to_google():
+            body = {'values': chunk}
+            return sheets_client.values().append(
+                spreadsheetId=spreadsheet_id,
+                range=f"{target_sheet_name}!A:A",
+                valueInputOption="USER_ENTERED",
+                body=body
+            ).execute()
+
+        # Mulai Logika Retry untuk Chunk Spesifik ini
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                # Panggil ke Google Sheets secara Asinkron
+                result = await asyncio.to_thread(append_chunk_to_google)
+                updates = result.get('updates', {})
+                baris_terupdate = updates.get('updatedRows', 0)
+                
+                print(f"    [+] BATCH {batch_num}: Berhasil menulis {baris_terupdate} baris.")
+                total_baris_berhasil += baris_terupdate
+                break  # Berhasil -> Keluar dari loop Retry, lanjut ke Batch berikutnya
+
+            except Exception as sheet_err:
+                print(f"    [!] BATCH {batch_num} - Percobaan {attempt} Gagal: {sheet_err}")
+                
+                if attempt < MAX_RETRIES:
+                    print(f"        [-] Menunggu {RETRY_DELAY} detik sebelum mencoba lagi...")
+                    await asyncio.sleep(RETRY_DELAY)
+                else:
+                    print(f"    [!] BATCH {batch_num} Gagal total setelah {MAX_RETRIES} percobaan. Dilewati.")
+                    # Opsional: Jika dibutuhkan, Anda bisa menyimpan 'chunk' yang gagal ke dalam
+                    # file error_log.csv lokal agar tidak ada data leads berharga yang hilang.
+        
+        # Jeda antar-batch (Rate-limit throttle proteksi)
+        # Jangan melakukan jeda di batch terakhir
+        if i + CHUNK_SIZE < total_data:
+            await asyncio.sleep(2) 
+
+    print(f"\n[+] REPOT MAPS FINAL: Secara keseluruhan berhasil menulis {total_baris_berhasil} dari {total_data} leads ke sheet '{target_sheet_name}'!")
 
 # ==========================================
 # PARALLEL SCRAPER PER SITE
@@ -1050,7 +1581,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 writer.writerow(["Raw_URL"])
                 for link in unique_links: writer.writerow([link])
                 
-                filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
+                filtered_links_response = await process_task_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                 urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
 
         # =====================================================================
@@ -1123,7 +1654,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 writer.writerow(["Raw_URL"])
                 for link in unique_links: writer.writerow([link])
                 
-                filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
+                filtered_links_response = await process_task_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                 urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
 
         elif site["handling_method"] == "pagination":
@@ -1180,7 +1711,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                 writer.writerow(["Raw_URL"])
                 for link in unique_links: writer.writerow([link])
                 
-                filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
+                filtered_links_response = await process_task_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                 urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
 
         elif site["handling_method"] == "firecrawl":
@@ -1215,7 +1746,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
                     writer.writerow(["Raw_URL"])
                     for link in unique_links: writer.writerow([link])
                     
-                    filtered_links_response = await filter_links_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
+                    filtered_links_response = await process_task_with_gemini(site['link_prompt'], memory_links_csv.getvalue())
                     urls_to_scrape = re.findall(r'(https?://[^\s\'",\]]+)', filtered_links_response)[:int(site['max_articles'])]
 
             except Exception as e:
@@ -1245,7 +1776,7 @@ async def scrape_single_site(site, context, tab_semaphore, master_file_name):
         for res in valid_results: 
             csv_writer.writerow([res['url'], res['text'][:8000].replace('\n', ' ')])
         
-        final_extracted_data = await extract_content_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
+        final_extracted_data = await process_task_with_gemini(site['data_prompt'], memory_data_csv.getvalue())
 
         if final_extracted_data.strip():
             print(f"[8] Menyimpan hasil ekstraksi berita ({site['name']}) oleh AI ke file master lokal...")
@@ -1476,7 +2007,35 @@ async def main():
 
     # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
     # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
+    hasil_ekspor = await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
+
+    # [7] Menyimpan berita ekspor ke spreadsheet ekspor-impor map
+    # [7] Menyimpan berita ekspor ke spreadsheet ekspor-impor map
+    data_untuk_leads = []
+    SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+    SHEET_NAME = "Berita"
+
+    # Jalankan pemrosesan ke Spreadsheet menggunakan metode File API yang aman dari token limit
+    if hasil_ekspor:
+        data_untuk_leads = await proses_analisis_supply_demand_ke_spreadsheet(
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name=SHEET_NAME,
+            data_respons_ai=hasil_ekspor
+        )
+    else:
+        print("[-] Data hasil_ekspor kosong, lewati sinkronisasi Spreadsheet.")
+
+    # [8] Meneruskan data hasil analisis ke proses pencarian leads bisnis
+    # [8] Meneruskan data hasil analisis ke proses pencarian leads bisnis
+    if data_untuk_leads:
+        print("\n[-] Melanjutkan ke pencarian leads bisnis berdasarkan hasil analisis...")
+        await proses_pencarian_leads_bisnis(
+            data_entitas_ai=data_untuk_leads,
+            spreadsheet_id=SPREADSHEET_ID,
+            target_sheet_name="Data Utama"
+        )
+    else:
+        print("\n[!] Lewati pencarian leads bisnis karena tidak ada data entitas yang tersedia.")
 
 if __name__ == "__main__":
     asyncio.run(main())
