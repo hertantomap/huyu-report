@@ -208,28 +208,33 @@ async def extract_content_with_gemini(prompt, csv_string):
 async def ask_gemini_with_inline_csv(prompt, csv_data):
     """
     Fungsi Async Gemini dengan Fallback.
-    Dapat menerima csv_data berupa String (Teks) maupun Objek File dari AI Storage.
+    Mendukung rotasi penuh 3 API Key menggunakan dictionary mapping file cloud.
     """
     models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it']
-    
-    current_client = await client_rotator.get_client() # Ambil giliran client
     
     for model_name in models_fallback_order:
         await gemini_limiter.acquire()
         
+        # Ambil client aktif saat ini (Rotasi berjalan normal di setiap model)
+        current_client = await client_rotator.get_client()
+        
         try:
             print(f"    [-] Mencoba menganalisis data menggunakan model Async: {model_name}...")
             
-            # CEK TIPE DATA: Jika teks string biasa, ubah ke bytes. 
-            # Jika objek file cloud (punya properti uri), gunakan langsung.
             if isinstance(csv_data, str):
                 data_csv_mentah = csv_data.encode('utf-8')
                 komponen_input = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+            elif isinstance(csv_data, dict):
+                # Ambil referensi file cloud yang sesuai dengan API Key client aktif saat ini
+                current_api_key = current_client.api_key
+                if current_api_key in csv_data:
+                    komponen_input = csv_data[current_api_key]
+                else:
+                    print(f"    [!] File untuk API Key aktif tidak ditemukan di storage mapping. Skip...")
+                    continue
             else:
-                # Ini berarti csv_data adalah objek file_ref dari hasil .files.upload()
                 komponen_input = csv_data
 
-            # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
             response = await current_client.aio.models.generate_content(
                 model=model_name,
                 contents=[komponen_input, prompt]
@@ -867,12 +872,11 @@ async def fetch_article_data(context, url, semaphore, selector_extract=None, max
 # ==========================================
 async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_dasar_format):
     """
-    Fungsi analisis berita master:
-    1. Memecah CSV lokal menjadi potongan kecil (CHUNK_SIZE = 200).
-    2. Mengunggah setiap chunk SATU KALI ke Google AI Storage.
-    3. Menggunakan referensi file yang sama untuk setiap jenis prompt.
-    4. Mengirimkan hasil FULL per prompt ke Telegram dengan Header.
-    5. Menghapus file di AI Storage setelah semua proses selesai.
+    Fungsi analisis berita master menggunakan strategi Multi-Key Upload Chunking:
+    - Memecah data per 200 baris.
+    - Mengunggah file ke cloud storage masing-masing API Key (mengantisipasi error 403).
+    - Menjalankan rotasi key penuh saat pemrosesan prompt.
+    - Mengirim pesan ke Telegram dengan proteksi splitter 4096 karakter.
     """
     if not os.path.exists(master_file_name):
         print(f"[!] File master {master_file_name} tidak ditemukan. Analisis dibatalkan.")
@@ -892,72 +896,80 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
     CHUNK_SIZE = 220 
     
     print(f"\n==================================================")
-    print(f"[9] MEMULAI PROSES UPLOAD CHUNK DAN ANALISIS BERITA")
+    print(f"[9] MEMULAI PROSES MULTI-KEY UPLOAD DAN ANALISIS BERITA")
     print(f"==================================================")
-    print(f"[-] Total data: {total_baris} baris. Mempersiapkan upload per {CHUNK_SIZE} baris...")
 
-    # Ambil client aktif pertama untuk proses upload berkas
-    current_client = await client_rotator.get_client()
+    # Dapatkan daftar semua client/API Key yang Anda miliki dari rotator
+    semua_client = client_rotator.clients
 
-    uploaded_chunks = []
+    # Tempat menyimpan referensi file cloud ter-mapping berdasarkan indeks chunk dan API Key
+    # Format: [ { "API_KEY_1": file_ref_1, "API_KEY_2": file_ref_2 }, ... ]
+    uploaded_chunks_map = []
     chunk_counter = 1
 
     # -------------------------------------------------------------------------
-    # TAHAP 1: POTONG DAN UNGGAH CHUNK (Hanya Sekali Jalan)
+    # TAHAP 1: UPLOAD DATA CHUNK KE SEMUA API KEY (Masing-masing punya salinan)
     # -------------------------------------------------------------------------
     for i in range(0, total_baris, CHUNK_SIZE):
         df_chunk = df.iloc[i : i + CHUNK_SIZE]
-        
-        # Buat file CSV sementara secara lokal untuk diunggah
         temp_chunk_path = f"temp_chunk_{chunk_counter}.csv"
         df_chunk.to_csv(temp_chunk_path, index=False)
         
-        try:
-            print(f"    [-] Mengunggah Chunk ke-{chunk_counter} ({len(df_chunk)} baris) ke AI Storage...")
-            # Proses unggah file ke Google AI Storage
-            file_ref = current_client.files.upload(
-                file=temp_chunk_path,
-                config=types.UploadFileConfig(mime_type="text/csv")
-            )
-            # Simpan referensi file cloud untuk dipakai di loop prompt nanti
-            uploaded_chunks.append(file_ref)
-            
-        except Exception as e:
-            print(f"    [!] Gagal mengunggah chunk ke-{chunk_counter}: {e}")
-        finally:
-            # Hapus file CSV sementara yang ada di laptop Anda
-            if os.path.exists(temp_chunk_path):
-                os.remove(temp_chunk_path)
+        chunk_key_mapping = {}
+        print(f"    [-] Menyiapkan Chunk ke-{chunk_counter} ({len(df_chunk)} baris)...")
+        
+        # Upload file chunk yang sama ke setiap API Key
+        for client in semua_client:
+            try:
+                # Masking API Key untuk log agar tetap aman
+                masked_key = f"...{client.api_key[-6:]}" if client.api_key else "Unknown"
+                print(f"        [-] Mengunggah ke Cloud Storage untuk Key {masked_key}...")
                 
+                file_ref = client.files.upload(
+                    file=temp_chunk_path,
+                    config=types.UploadFileConfig(mime_type="text/csv")
+                )
+                # Petakan referensi file ke string API Key-nya
+                chunk_key_mapping[client.api_key] = file_ref
+            except Exception as e:
+                print(f"        [!] Gagal mengunggah untuk Key {masked_key}: {e}")
+        
+        if chunk_key_mapping:
+            uploaded_chunks_map.append(chunk_key_mapping)
+            
+        if os.path.exists(temp_chunk_path):
+            os.remove(temp_chunk_path)
+            
         chunk_counter += 1
 
-    if not uploaded_chunks:
-        print("[!] Tidak ada chunk data yang berhasil diunggah. Proses dibatalkan.")
+    if not uploaded_chunks_map:
+        print("[!] Tidak ada chunk data yang berhasil diunggah ke key manapun. Proses dibatalkan.")
         return
 
     # -------------------------------------------------------------------------
-    # TAHAP 2: EKSEKUSI PROMPTS_DATA MENGGUNAKAN FILE CLOUD YANG SAMA
+    # TAHAP 2: EKSEKUSI PROMPTS MENGGUNAKAN ROTASI API KEY PENUH
     # -------------------------------------------------------------------------
     for prompt_key, prompt_text in prompts_data.items():
         print(f"\n[-] Menjalankan AI untuk Prompt: '{prompt_key}'...")
-        
         hasil_parsial_prompt = []
         
-        for idx, file_ref in enumerate(uploaded_chunks):
+        for idx, chunk_map in enumerate(uploaded_chunks_map):
             batch_num = idx + 1
             print(f"    [-] Memproses Cloud Chunk ke-{batch_num}...")
             
             prompt_lengkap = f"{prompt_text}\n\n{prompt_dasar_format}"
             
-            # [PANGGIL FUNGSI ASLI ANDA] Melemparkan file_ref langsung ke fungsi inline Anda
-            respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, file_ref)
+            # Lempar dictionary chunk_map ke fungsi. Rotasi internal 3 API Key akan bekerja otomatis tanpa 403!
+            respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, chunk_map)
             
             if respons_ai:
                 hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n{respons_ai}")
             else:
                 hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n[AI Gagal Merespons]")
         
-        # 3. GABUNGKAN HASIL & KIRIM KE TELEGRAM PER PROMPT
+        # -------------------------------------------------------------------------
+        # TAHAP 3: BERSIHKAN FILE DI SEMUA API KEY STORAGE (Housekeeping)
+        # -------------------------------------------------------------------------
         analisis_akhir_prompt = "\n\n────────────────────\n\n".join(hasil_parsial_prompt)
         
         tz_jkt = pytz.timezone('Asia/Jakarta')
@@ -980,14 +992,17 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         print(f"[+] Selesai memproses dan mengirim Prompt: '{prompt_key}' ke Telegram.\n")
 
     # -------------------------------------------------------------------------
-    # TAHAP 3: BERSIHKAN FILE DI AI STORAGE (Housekeeping)
+    # TAHAP 4: BERSIHKAN FILE DI SEMUA API KEY STORAGE (Housekeeping)
     # -------------------------------------------------------------------------
-    print("[-] Membersihkan semua berkas chunk dari Google AI Storage...")
-    for file_ref in uploaded_chunks:
-        try:
-            current_client.files.delete(name=file_ref.name)
-        except Exception as e:
-            print(f"    [!] Gagal menghapus {file_ref.name}: {e}")
+    print("[-] Membersihkan semua berkas chunk dari Google AI Storage (Seluruh Key)...")
+    for chunk_map in uploaded_chunks_map:
+        for client in semua_client:
+            if client.api_key in chunk_map:
+                try:
+                    file_ref = chunk_map[client.api_key]
+                    client.files.delete(name=file_ref.name)
+                except Exception as e:
+                    pass
 
     print("[+] Seluruh proses unggah, analisis, dan pembersihan selesai dengan sukses!")
 
