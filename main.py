@@ -1,4 +1,5 @@
 import asyncio
+import requests
 import time
 import random
 import string
@@ -35,6 +36,7 @@ FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 GEMINI_API_KEY_1 = os.getenv("GEMINI_API_KEY_1")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
 GEMINI_API_KEY_3 = os.getenv("GEMINI_API_KEY_3")
+GEMINI_API_KEY_4 = os.getenv("GEMINI_API_KEY_4")
 
 # =====================================================================
 # INISIALISASI GOOGLE SHEETS API
@@ -70,7 +72,7 @@ except Exception as e:
 
 
 # Masukkan ke dalam list dan abaikan yang kosong (jika sewaktu-waktu Anda hanya pakai 2 key)
-api_keys = [k for k in [GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3] if k]
+api_keys = [k for k in [GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3, GEMINI_API_KEY_4] if k]
 
 if not api_keys:
     raise ValueError("Tidak ada GEMINI_API_KEY yang ditemukan di dalam file .env!")
@@ -173,7 +175,7 @@ async def fetch_dynamic_config(url, max_retries=3, retry_delay=5):
 async def process_task_with_gemini(prompt, csv_string):
     print("    [-] Kuota terverifikasi. Mengirim request filter link ke Gemini...")
     
-    models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
+    models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash']
     data_csv_mentah = csv_string.encode('utf-8')
     
     current_client, current_api_key = await client_rotator.get_client() # Ambil giliran client
@@ -211,7 +213,7 @@ async def ask_gemini_with_inline_csv(prompt, csv_data):
     """
     Fungsi Async Gemini dengan Fallback mendukung peninjauan key aktif via Client Rotator Tuple.
     """
-    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it']
+    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite']
     
     for model_name in models_fallback_order:
         await gemini_limiter.acquire()
@@ -593,15 +595,10 @@ async def fetch_yahoo_finance_news_urls(ticker_code="BTC-USD"):
         print(f"    [!] Gagal mengambil berita Yahoo Finance untuk {ticker_code}: {e}")
         return daftar_berita
     
-# ==========================================
-# FUNGSI NOTIFIKASI TELEGRAM
-# ==========================================
-# =====================================================================
-# FUNGSI NOTIFIKASI TELEGRAM (AUTO-SPLIT JIKA LEBIH DARI 4000 KARAKTER)
-# =====================================================================
 # =====================================================================
 # FUNGSI NOTIFIKASI TELEGRAM (DENGAN RETRY & TIMEOUT LEBIH TINGGI)
 # =====================================================================
+session = requests.Session()
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
@@ -676,36 +673,34 @@ def send_telegram_message(text):
             "text": text_payload,
             "parse_mode": "HTML"
         }
-        data = urllib.parse.urlencode(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
         
-        # [PERBAIKAN]: Tambahkan mekanisme retry
+        # Eksekusi dengan requests.Session
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                # [PERBAIKAN]: Timeout dinaikkan menjadi 45 detik untuk menangani handshake yang lambat
-                with urllib.request.urlopen(req, timeout=45) as response:
-                    print(f" [+] Potongan pesan {i + 1}/{total_bagian} sukses terkirim.")
-                    break # Keluar dari loop retry jika sukses
-            except Exception as e:
-                print(f" [!] Gagal kirim potongan {i + 1} (Percobaan {attempt}): {e}")
+                # requests akan mengurus encoding dictionary ke form-data secara otomatis
+                response = session.post(url, data=payload, timeout=(10, 60))
+                response.raise_for_status() 
+                print(f" [+] Potongan pesan {i + 1}/{total_bagian} sukses terkirim.")
+                break 
+            except requests.exceptions.RequestException as e:
+                print(f" [!] Gagal kirim potongan {i + 1} (Attempt {attempt}): {e}")
                 if attempt < max_retries:
-                    time.sleep(5) # Tunggu 5 detik sebelum mencoba lagi
+                    time.sleep(2.5)
                 else:
-                    # Gagal setelah 3 kali, coba fallback ke teks biasa
-                    print(f" [!] Mencoba kirim sebagai Plain Text...")
+                    # Fallback Plain Text
+                    print(" [!] Mencoba fallback plain text...")
                     try:
-                        plain_chunk = re.sub(r'<[^>]*>', '', chunk)
-                        payload_fallback = {
+                        plain_payload = {
                             "chat_id": TELEGRAM_CHAT_ID,
-                            "text": plain_chunk[:3500],
-                            "parse_mode": "" # Tanpa HTML
+                            "text": re.sub(r'<[^>]*>', '', chunk),
                         }
-                        data_fb = urllib.parse.urlencode(payload_fallback).encode("utf-8")
-                        urllib.request.urlopen(urllib.request.Request(url, data=data_fb, method="POST"), timeout=45)
-                        print(" [+] Pengiriman fallback sukses.")
+                        session.post(url, data=plain_payload, timeout=60)
                     except Exception as e_fb:
                         print(f" [!] Pengiriman cadangan gagal: {e_fb}")
+        
+        time.sleep(1.5)
+        
 
 # ==========================================
 # FUNGSI PEMBANTU BROWSER
@@ -876,7 +871,6 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
     - Menjalankan rotasi key penuh saat pemrosesan prompt.
     - Mengirim pesan ke Telegram dengan proteksi splitter 4096 karakter.
     """
-    hasil_ekspor_ai = None # Siapkan variabel untuk menyimpan respons
     
     if not os.path.exists(master_file_name):
         print(f"[!] File master {master_file_name} tidak ditemukan. Analisis dibatalkan.")
@@ -903,7 +897,6 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
     semua_client = client_rotator.clients
 
     # Tempat menyimpan referensi file cloud ter-mapping berdasarkan indeks chunk dan API Key
-    # Format: [ { "API_KEY_1": file_ref_1, "API_KEY_2": file_ref_2 }, ... ]
     uploaded_chunks_map = []
     chunk_counter = 1
 
@@ -947,37 +940,50 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         return
 
     # -------------------------------------------------------------------------
-    # TAHAP 2: EKSEKUSI PROMPTS MENGGUNAKAN ROTASI API KEY PENUH
+    # TAHAP 2: EKSEKUSI PROMPTS (PARALEL)
     # -------------------------------------------------------------------------
-    for prompt_key, prompt_text in prompts_data.items():
-        if prompt_key == "PROMPT_DASAR_FORMAT":
-            continue
-        
-        print(f"\n[-] Menjalankan AI untuk Prompt: '{prompt_key}'...")
-        hasil_parsial_prompt = []
+    async def tugas_prompt(prompt_key, prompt_text):
+        print(f"[-] Menjalankan AI untuk Prompt: '{prompt_key}' (Paralel)...")
+        hasil_parsial = []
         
         for idx, chunk_map in enumerate(uploaded_chunks_map):
             batch_num = idx + 1
-            print(f"    [-] Memproses Cloud Chunk ke-{batch_num}...")
-            
             prompt_lengkap = f"{prompt_text}\n\n{prompt_dasar_format}"
             
-            # Lempar dictionary chunk_map ke fungsi. Rotasi internal 3 API Key akan bekerja otomatis tanpa 403!
+            # Eksekusi chunk
             respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, chunk_map)
             
-            if respons_ai:
-                hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n{respons_ai}")
-                
-                # [TAMBAHKAN LOGIKA INI]
-                if prompt_key == "PROMPT_BISNIS_EKSPOR":
-                    hasil_ekspor_ai = respons_ai
-            else:
-                hasil_parsial_prompt.append(f"<b>[BATCH {batch_num}]</b>\n[AI Gagal Merespons]")
+            hasil_parsial.append({
+                "batch": batch_num,
+                "text": respons_ai if respons_ai else "[AI Gagal Merespons]"
+            })
+            
+        return prompt_key, hasil_parsial
+
+    # Jalankan semua prompt secara paralel
+    tasks = [tugas_prompt(k, v) for k, v in prompts_data.items() if k != "PROMPT_DASAR_FORMAT"]
+    list_hasil_mentah = await asyncio.gather(*tasks)
+
+    # Ubah hasil menjadi dictionary agar mudah diakses berdasarkan urutan aslinya
+    hasil_dict = {item[0]: item[1] for item in list_hasil_mentah}
+
+    # FIX: Mengambil hasil ekspor dari hasil yang sudah terkumpul
+    hasil_ekspor_ai = None # Siapkan variabel untuk menyimpan respons
+    if "PROMPT_BISNIS_EKSPOR" in hasil_dict:
+        # Mengambil teks dari batch pertama sebagai sampel ekspor
+        hasil_ekspor_ai = hasil_dict["PROMPT_BISNIS_EKSPOR"][0]['text']
+
+    # -------------------------------------------------------------------------
+    # TAHAP 3: KIRIM KE TELEGRAM (BERURUTAN)
+    # -------------------------------------------------------------------------
+    for prompt_key in prompts_data.keys():
+        if prompt_key == "PROMPT_DASAR_FORMAT" or prompt_key not in hasil_dict:
+            continue
+            
+        print(f"[-] Mengirim urutan hasil untuk: {prompt_key}...")
         
-        # -------------------------------------------------------------------------
-        # TAHAP 3: BERSIHKAN FILE DI SEMUA API KEY STORAGE (Housekeeping)
-        # -------------------------------------------------------------------------
-        analisis_akhir_prompt = "\n\n────────────────────\n\n".join(hasil_parsial_prompt)
+        data_batch = sorted(hasil_dict[prompt_key], key=lambda x: x['batch'])
+        gabungan_text = "\n\n────────────────────\n\n".join([f"<b>[BATCH {b['batch']}]</b>\n{b['text']}" for b in data_batch])
         
         tz_jkt = pytz.timezone('Asia/Jakarta')
         waktu_sekarang = datetime.now(tz_jkt)
@@ -994,12 +1000,9 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
             f"────────────────────\n\n"
         )
         
-        # 3. KIRIM PESAN KE TELEGRAM
-        pesan_full = header_pesan + analisis_akhir_prompt
+        pesan_full = header_pesan + gabungan_text
         
         await asyncio.to_thread(send_telegram_message, pesan_full)
-
-        print(f"[+] Selesai memproses dan mengirim Prompt: '{prompt_key}' ke Telegram.\n")
 
     # -------------------------------------------------------------------------
     # TAHAP 4: BERSIHKAN FILE DI SEMUA API KEY STORAGE (Housekeeping)
@@ -1119,7 +1122,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
             )
         )
 
-        models_fallback_order = ['gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it']
+        models_fallback_order = ['gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it']
 
         # 4. Kirim referensi file cloud (uploaded_file) beserta prompt ke Gemini
         for model_name in models_fallback_order:
@@ -1318,7 +1321,7 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
             )
         )
 
-        models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it']
+        models_fallback_order = ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemma-4-26b-a4b-it']
         response_text = ""
         for model_name in models_fallback_order:
             await gemini_limiter.acquire()
@@ -1378,7 +1381,7 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
                     
                     try:
                         # Pastikan sidebar termuat terlebih dahulu
-                        await page.wait_for_selector(scrollable_sidebar_selector, timeout=20000)
+                        await page.wait_for_selector(scrollable_sidebar_selector, timeout=15000)
                         
                         # Lakukan scroll sebanyak 4-5 kali ke bawah untuk memuat hingga 15-20 tempat usaha
                         for scroll_step in range(4):
@@ -2007,7 +2010,7 @@ async def main():
 
     # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
     # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    hasil_ekspor = await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
+    hasil_ekspor = await proses_analisis_berita_master("database_historis/master_berita_20260607_222731.csv", PROMPTS_DATA, PROMPT_DASAR_FORMAT)
 
     # [7] Menyimpan berita ekspor ke spreadsheet ekspor-impor map
     # [7] Menyimpan berita ekspor ke spreadsheet ekspor-impor map
