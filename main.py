@@ -1460,7 +1460,7 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
                             "",                                           # Whatsapp (Kosong)
                             "",                                           # Website (Bisa dikosongkan/diisi dinamis)
                             f"{kategori_detail}",                         # Deskripsi Singkat
-                            f"Profil Usaha Fisik Kategori ({kategori_detail}) Terdaftar Resmi di Google Maps wilayah {item['kota']}, {item['negara']}." # Deskripsi Lengkap
+                            f"Profil Usaha Fisik ({kategori_detail}) Terdaftar Resmi di Google Maps wilayah {item['kota']}, {item['negara']}." # Deskripsi Lengkap
                         ]
                         values_to_append.append(row_data)
                         jumlah_per_kueri += 1
@@ -2010,7 +2010,7 @@ async def main():
 
     # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
     # [6] Eksekusi analisis berurutan setelah data terkumpul lengkap
-    hasil_ekspor = await proses_analisis_berita_master("database_historis/master_berita_20260607_222731.csv", PROMPTS_DATA, PROMPT_DASAR_FORMAT)
+    hasil_ekspor = await proses_analisis_berita_master(master_file_name, PROMPTS_DATA, PROMPT_DASAR_FORMAT)
 
     # [7] Menyimpan berita ekspor ke spreadsheet ekspor-impor map
     # [7] Menyimpan berita ekspor ke spreadsheet ekspor-impor map
