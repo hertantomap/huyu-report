@@ -96,6 +96,7 @@ class ClientRotator:
         return client_obj, api_key # Kembalikan berpasangan
 
 client_rotator = ClientRotator(api_keys)
+gemini_concurrency_limiter = asyncio.Semaphore(len(api_keys))
 
 # =====================================================================
 # SYSTEM SMART RATE LIMITER
@@ -183,25 +184,27 @@ async def process_task_with_gemini(prompt, csv_string):
     for model_name in models_fallback_order:
         await gemini_limiter.acquire()
         
-        try:
-            print(f"    [-] Mencoba memfilter konten berita menggunakan model Async: {model_name}...")
-            komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
-            generate_content_config = types.GenerateContentConfig(
-                thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
-            )
-            
-            # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
-            response = await current_client.aio.models.generate_content(
-                model=model_name,
-                contents=[komponen_csv, prompt],
-                config=generate_content_config
-            )
-            
-            if response and response.text:
-                return response.text
+        async with gemini_concurrency_limiter:
+            current_client, current_api_key = await client_rotator.get_client()
+            try:
+                print(f"    [-] Mencoba memfilter konten berita menggunakan model Async: {model_name}...")
+                komponen_csv = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+                generate_content_config = types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
+                )
                 
-        except Exception as e:
-            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
+                # [NATIVE ASYNC]: Menggunakan .aio dan langsung di-await
+                response = await current_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=[komponen_csv, prompt],
+                    config=generate_content_config
+                )
+                
+                if response and response.text:
+                    return response.text
+                    
+            except Exception as e:
+                print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback dengan API Key yang sama...")
 
     print("    [!] Semua model untuk Ekstraksi Konten gagal merespons pada API Key ini.")
     return ""
@@ -213,40 +216,41 @@ async def ask_gemini_with_inline_csv(prompt, csv_data):
     """
     Fungsi Async Gemini dengan Fallback mendukung peninjauan key aktif via Client Rotator Tuple.
     """
-    models_fallback_order = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite']
+    models_fallback_order = ['gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite']
     
     for model_name in models_fallback_order:
         await gemini_limiter.acquire()
         
-        # Dapatkan index saat ini SEBELUM get_client() merotasi nilainya
-        current_client, current_api_key = await client_rotator.get_client() 
-        
-        try:
-            print(f"    [-] Mencoba menganalisis data menggunakan model Async: {model_name}...")
+        # Cegah burst concurrency (Lonjakan paralel)
+        async with gemini_concurrency_limiter:
+            current_client, current_api_key = await client_rotator.get_client() 
             
-            if isinstance(csv_data, str):
-                data_csv_mentah = csv_data.encode('utf-8')
-                komponen_input = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
-            elif isinstance(csv_data, dict):
-                # Cari file_ref cloud berdasarkan string key aktif saat ini
-                if current_api_key in csv_data:
-                    komponen_input = csv_data[current_api_key]
-                else:
-                    print(f"    [!] File untuk API Key aktif tidak ditemukan di storage mapping. Skip...")
-                    continue
-            else:
-                komponen_input = csv_data
-
-            response = await current_client.aio.models.generate_content(
-                model=model_name,
-                contents=[komponen_input, prompt]
-            )
-            
-            if response and response.text:
-                return response.text
+            try:
+                print(f"    [-] Mencoba menganalisis data menggunakan model Async: {model_name}...")
                 
-        except Exception as e:
-            print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback...")
+                if isinstance(csv_data, str):
+                    data_csv_mentah = csv_data.encode('utf-8')
+                    komponen_input = types.Part.from_bytes(data=data_csv_mentah, mime_type="text/csv")
+                elif isinstance(csv_data, dict):
+                    if current_api_key in csv_data:
+                        komponen_input = csv_data[current_api_key]
+                    else:
+                        print(f"    [!] File untuk API Key aktif tidak ditemukan. Skip...")
+                        continue
+                else:
+                    komponen_input = csv_data
+
+                # Tambahkan parameter timeout eksplisit jika dimungkinkan oleh SDK, atau biarkan default
+                response = await current_client.aio.models.generate_content(
+                    model=model_name,
+                    contents=[komponen_input, prompt]
+                )
+                
+                if response and response.text:
+                    return response.text
+                    
+            except Exception as e:
+                print(f"    [!] Model {model_name} Error: {e}. Mencoba model fallback...")
 
     print("    [!] Semua model untuk Analisis Data gagal merespons pada API Key ini.")
     return ""
@@ -940,38 +944,50 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         return
 
     # -------------------------------------------------------------------------
-    # TAHAP 2: EKSEKUSI PROMPTS (PARALEL)
+    # TAHAP 2: EKSEKUSI PROMPTS DAN CHUNKS (PARALEL TOTAL)
     # -------------------------------------------------------------------------
-    async def tugas_prompt(prompt_key, prompt_text):
-        print(f"[-] Menjalankan AI untuk Prompt: '{prompt_key}' (Paralel)...")
-        hasil_parsial = []
+    async def eksekusi_single_chunk(prompt_key, prompt_text, batch_num, chunk_map):
+        """Fungsi pekerja kecil untuk mengeksekusi satu chunk spesifik"""
+        prompt_lengkap = f"{prompt_text}\n\n{prompt_dasar_format}"
+        respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, chunk_map)
         
+        return {
+            "prompt_key": prompt_key,
+            "batch": batch_num,
+            "text": respons_ai if respons_ai else "[AI Gagal Merespons]"
+        }
+
+    # Kumpulkan semua kombinasi Prompt x Chunk ke dalam satu list antrean raksasa
+    daftar_tugas_flat = []
+    for k, v in prompts_data.items():
+        if k == "PROMPT_DASAR_FORMAT":
+            continue
         for idx, chunk_map in enumerate(uploaded_chunks_map):
             batch_num = idx + 1
-            prompt_lengkap = f"{prompt_text}\n\n{prompt_dasar_format}"
-            
-            # Eksekusi chunk
-            respons_ai = await ask_gemini_with_inline_csv(prompt_lengkap, chunk_map)
-            
-            hasil_parsial.append({
-                "batch": batch_num,
-                "text": respons_ai if respons_ai else "[AI Gagal Merespons]"
-            })
-            
-        return prompt_key, hasil_parsial
+            daftar_tugas_flat.append(
+                eksekusi_single_chunk(k, v, batch_num, chunk_map)
+            )
 
-    # Jalankan semua prompt secara paralel
-    tasks = [tugas_prompt(k, v) for k, v in prompts_data.items() if k != "PROMPT_DASAR_FORMAT"]
-    list_hasil_mentah = await asyncio.gather(*tasks)
+    print(f"[-] Menjalankan total {len(daftar_tugas_flat)} sub-proses analisis AI secara Paralel Total...")
+    semua_hasil_flat = await asyncio.gather(*daftar_tugas_flat)
 
-    # Ubah hasil menjadi dictionary agar mudah diakses berdasarkan urutan aslinya
-    hasil_dict = {item[0]: item[1] for item in list_hasil_mentah}
+    # Susun ulang struktur data flat menjadi format dictionary hasil_dict lama Anda
+    hasil_dict = {k: [] for k in prompts_data.keys() if k != "PROMPT_DASAR_FORMAT"}
+    for res in semua_hasil_flat:
+        hasil_dict[res["prompt_key"]].append({
+            "batch": res["batch"],
+            "text": res["text"]
+        })
 
-    # FIX: Mengambil hasil ekspor dari hasil yang sudah terkumpul
-    hasil_ekspor_ai = None # Siapkan variabel untuk menyimpan respons
-    if "PROMPT_BISNIS_EKSPOR" in hasil_dict:
-        # Mengambil teks dari batch pertama sebagai sampel ekspor
-        hasil_ekspor_ai = hasil_dict["PROMPT_BISNIS_EKSPOR"][0]['text']
+    # =========================================================================
+    # AMBIL HASIL EKSPOR (TETAP AMAN & TIDAK HILANG)
+    # =========================================================================
+    hasil_ekspor_ai = None 
+    if "PROMPT_BISNIS_EKSPOR" in hasil_dict and hasil_dict["PROMPT_BISNIS_EKSPOR"]:
+        # Karena urutan batch paralel bisa acak, kita sort dulu berdasarkan nomor batch-nya
+        data_ekspor_sorted = sorted(hasil_dict["PROMPT_BISNIS_EKSPOR"], key=lambda x: x['batch'])
+        # Ambil teks dari BATCH 1 sebagai sampel ekspor untuk kebutuhan Leads / Spreadsheet Anda
+        hasil_ekspor_ai = data_ekspor_sorted[0]['text']
 
     # -------------------------------------------------------------------------
     # TAHAP 3: KIRIM KE TELEGRAM (BERURUTAN)
@@ -1012,8 +1028,8 @@ async def proses_analisis_berita_master(master_file_name, prompts_data, prompt_d
         for client, api_key_str in semua_client:
             if api_key_str and api_key_str in chunk_map:
                 try:
-                    file_ref = chunk_map[api_key_str]
-                    client.files.delete(name=file_ref.name)
+                    target_file_ref = chunk_map[api_key_str]
+                    await asyncio.to_thread(client.files.delete, target_file_ref.name)
                 except Exception as e:
                     pass
 
@@ -1046,9 +1062,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         print(f"[!] Gagal membuat file teks lokal: {e}")
         return
 
-    idx_sekarang = client_rotator.index
-    current_client, current_api_key = await client_rotator.get_client()
-    _, current_api_key = client_rotator.clients[idx_sekarang]
+    current_client, current_api_key = await client_rotator.get_client()  
     
     uploaded_file = None
     response_text = ""
@@ -1154,9 +1168,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         
         if uploaded_file:
             try:
-                def delete_cloud_file():
-                    current_client.files.delete(name=uploaded_file.name)
-                await asyncio.to_thread(delete_cloud_file)
+                await asyncio.to_thread(current_client.files.delete, uploaded_file.name)
                 print("[-] Berhasil menghapus file dari storage Gemini Cloud.")
             except Exception as clear_err:
                 print(f"[!] Gagal menghapus file cloud: {clear_err}")
