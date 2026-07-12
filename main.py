@@ -13,6 +13,7 @@ import urllib.parse
 import json
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import pytz
 from dotenv import load_dotenv
 import yfinance as yf
@@ -1050,6 +1051,23 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
     print(f"[-] MEMULAI PROSES STRUKTURISASI DATA VIA GEMINI FILE API")
     print(f"──────────────────────────────────────")
 
+    # --- PENGAMBILAN TANGGAL BAHASA INDONESIA (LOKAL FUNGSI) ---
+    def get_tanggal_indo():
+        hari_indo = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+        bulan_indo = [
+            "", "Januari", "Februari", "Maret", "April", "Mei", "Juni", 
+            "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+        ]
+        
+        now = datetime.now(ZoneInfo("Asia/Jakarta"))
+        # .weekday() mengembalikan 0=Senin, 6=Minggu
+        nama_hari = hari_indo[now.weekday()]
+        nama_bulan = bulan_indo[now.month]
+        
+        return f"{nama_hari}, {now.day} {nama_bulan} {now.year}"
+
+    tanggal_hari_ini = get_tanggal_indo()
+
     # =====================================================================
     # AMBIL DATA KOORDINAT LAMA UNTUK PENGECEKAN DUPLIKAT
     # =====================================================================
@@ -1137,7 +1155,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         3. Negara: Indonesia -> Status_Pasar: Supply (Karena merupakan negara asal komoditas)
 
         Instruksi Pengisian Bidang JSON (Hasilkan Array of Objects):
-        1. 'tanggal': Berikan tanggal hari ini (Format: Kamis, 9 Juli 2026).
+        1. 'tanggal': (TIDAK PERLU DIISI, KOSONGKAN SAJA).
         2. 'isi_berita_ringkas': Ringkasan inti dari dinamika ekspor komoditas tersebut (maksimal 2-5 kalimat).
         3. 'sumber_berita': Ambil dari tanda kurung siku di akhir paragraf (contoh dari '[Tempo, Bisnis]' menjadi 'Tempo, Bisnis'). Jika tidak ada, isi "-".
         4. 'komoditas': Nama komoditas/barang fisik utama (contoh: "Biji Plastik dan Nafta" atau "Daun Ketapang").
@@ -1263,7 +1281,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
             
             # Susun kolom rapi untuk baris Spreadsheet Anda
             row_data = [
-                item.get("tanggal", "-"),
+                tanggal_hari_ini,
                 item.get("isi_berita_ringkas", ""),
                 item.get("sumber_berita", ""),
                 item.get("komoditas", "").title(),
@@ -1392,15 +1410,20 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
         Tugas Anda adalah merumuskan TIGA (3) kueri pencarian lokal spesifik (Bahasa Inggris) untuk dimasukkan ke Google Maps berdasarkan file CSV yang dilampirkan.
 
         TARGET STRATEGI STRUKTUR TIER KUERI (WAJIB PATUH):
-        - Jika 'Status_Pasar' bernilai 'Demand' (Pembeli), pecah kueri berdasarkan 3 tingkatan skala bisnis dari kecil ke besar:
-          * Kueri 1 (Tier 1 - Skala Kecil / Konsumen Ritel Komersial): Fokus mencari bisnis pengguna akhir yang langsung menyerap produk (contoh: Kafe, Roastery lokal, Bakery, Restoran lokal).
-          * Kueri 2 (Tier 2 - Skala Menengah / Grosir & Distributor): Fokus mencari rantai distribusi tengah yg berhubungan dengan produk (contoh: B2B Wholesaler, local supplier, distributor bahan baku).
-          * Kueri 3 (Tier 3 - Skala Besar / Importir & Industri Manufaktur): Fokus mencari penyerap volume masif produk (contoh: Main Importer, Trading House internasional, F&B factory).
+        - Jika 'status_pasar' merupakan Demand (Pembeli), pecah kueri berdasarkan 3 tingkatan skala bisnis dari kecil ke besar:
+          * Kueri 1 (Tier 1 - Skala Kecil / Konsumen Ritel Komersial): Fokus mencari bisnis pengguna akhir yang langsung menyerap produk (contoh: Kafe, Roastery lokal, Bakery, Restoran lokal, dan sebagainya).
+          * Kueri 2 (Tier 2 - Skala Menengah / Grosir & Distributor): Fokus mencari rantai distribusi tengah yg berhubungan dengan produk (contoh: B2B Wholesaler, local supplier, distributor bahan baku, dan sebagainya).
+          * Kueri 3 (Tier 3 - Skala Besar / Importir & Industri Manufaktur): Fokus mencari penyerap volume masif produk (contoh: Main Importer, Trading House internasional, F&B factory, dan sebagainya).
           
-        - Jika 'Status_Pasar' bernilai 'Supply' (Supplier), pecah kueri berdasarkan tingkatan pasokan:
-          * Kueri 1 (Tier 1 - Pengrajin/Produsen Kecil): Pembuat lokal, workshop, atau asosiasi petani lokal.
-          * Kueri 2 (Tier 2 - Pabrik/Supplier Menengah): Supplier B2B lokal, pabrikasi wilayah, atau processing mill menengah.
-          * Kueri 3 (Tier 3 - Pabrik Besar/Eksportir Utama): Pabrik manufaktur utama skala industri (Large Factory / Manufacturer) atau Perusahaan perdagangan ekspor (Export Trading House / Active Exporter).
+        - Jika 'status_pasar' merupakan Supply (Supplier/Penjual), pecah kueri berdasarkan tingkatan pasokan:
+          * Kueri 1 (Tier 1 - Pengrajin/Produsen Kecil): Pembuat lokal, workshop, asosiasi petani lokal atau sebagainya.
+          * Kueri 2 (Tier 2 - Pabrik/Supplier Menengah): Supplier B2B lokal, pabrikasi wilayah, processing mill menengah atau sebagainya.
+          * Kueri 3 (Tier 3 - Pabrik Besar/Eksportir Utama): Pabrik manufaktur utama skala industri, Perusahaan perdagangan ekspor atau sebagainya.
+
+        - Jika 'status_pasar' merupakan entitas lain (contoh: Forwarder, Bea Cukai, Agen Logistik, dll), pecah kueri berdasarkan jangkauan atau skala operasi:
+          * Kueri 1 (Tier 1 - Skala Lokal/Cabang): Kantor cabang lokal, perantara logistik kecil, atau jasa custom clearance perorangan/lokal.
+          * Kueri 2 (Tier 2 - Skala Menengah/Nasional): Perusahaan forwarder/logistik skala nasional atau perusahaan B2B kepabeanan.
+          * Kueri 3 (Tier 3 - Skala Besar/Pusat/Internasional): Otoritas pelabuhan utama (Port Authority), instansi resmi Bea Cukai pusat (Customs Office), atau perusahaan logistik multinasional.
 
         Respons HARUS berupa JSON Array murni berisi list objek per id_entitas (tanpa markdown ```json, tanpa penjelasan teks pembuka/penutup):
         [
