@@ -767,7 +767,7 @@ async def handle_rss_feed(rss_url, engine="firecrawl", page=None):
                 engine = "playwright"
             else:
                 firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
-                doc = firecrawl.scrape(rss_url, formats=["html"])
+                doc = await asyncio.to_thread(firecrawl.scrape, rss_url, formats=["html"])
                 if doc and hasattr(doc, 'html') and doc.html:
                     raw_html_content = doc.html
                 else:
@@ -1050,6 +1050,32 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
     print(f"[-] MEMULAI PROSES STRUKTURISASI DATA VIA GEMINI FILE API")
     print(f"──────────────────────────────────────")
 
+    # =====================================================================
+    # AMBIL DATA KOORDINAT LAMA UNTUK PENGECEKAN DUPLIKAT
+    # =====================================================================
+    def get_existing_coords_supply_demand():
+        try:
+            # Kita hanya mengambil kolom I (Latitude) dan J (Longitude)
+            range_to_read = f"{sheet_name}!I:J"
+            result = sheets_client.values().get(spreadsheetId=spreadsheet_id, range=range_to_read).execute()
+            rows = result.get('values', [])
+            
+            coords_set = set()
+            for row in rows:
+                # Karena rentang data hanya 2 kolom (I:J), kolom I menjadi row[0] dan J menjadi row[1]
+                if len(row) >= 2:
+                    lat_str = row[0].strip()
+                    lon_str = row[1].strip()
+                    if lat_str and lon_str and lat_str != "0" and lon_str != "0":
+                        coords_set.add(f"{lat_str}|{lon_str}")
+            return coords_set
+        except Exception as e:
+            print(f"[!] Gagal membaca koordinat lama di sheet {sheet_name}: {e}")
+            return set()
+
+    existing_coords = await asyncio.to_thread(get_existing_coords_supply_demand)
+    print(f"[*] Menemukan {len(existing_coords)} koordinat yang sudah ada di sheet '{sheet_name}'.")
+
     # 1. Buat file teks sementara secara lokal berisi narasi respons_ai
     temp_txt_file = "temp_ekspor_report.txt"
     try:
@@ -1087,26 +1113,37 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         1. Anda HANYA BOLEH mengekstrak informasi yang membahas perdagangan, transaksi, kebutuhan atau potensi komoditas/barang fisik LINTAS NEGARA (Ekspor-Impor, Kesepakatan Bilateral).
 
         PANDUAN KECERDASAN MULTI-ENTITAS (DEMAND & SUPPLY SPLITTING):
-        - Dokumen ini berisi rangkuman berita ekspor-impor. Jika sebuah berita membahas pergeseran pasar atau transaksi yang melibatkan banyak pihak, Anda WAJIB memecahnya menjadi beberapa objek JSON terpisah berdasarkan perannya:
-          * Sisi 'Demand': Negara/pihak yang membutuhkan, membeli, atau mengimpor komoditas.
-          * Sisi 'Supply': Negara/pihak yang menyediakan, menjual, atau mengekspor komoditas.
-        - Analisis kalimat secara mendalam: Jika satu negara mengalihkan pembelian dari Negara A ke Negara B, maka akan muncul 3 objek: 1 Demand (negara pembeli) dan 2 Supply (Negara A sebagai pemasok lama/berkurang, Negara B sebagai pemasok baru).
+        - Dokumen ini berisi rangkuman berita ekspor-impor. Jika sebuah berita membahas pergeseran pasar atau transaksi yang melibatkan banyak pihak (baik banyak pemasok maupun banyak pasar tujuan), Anda WAJIB memecahnya menjadi beberapa objek JSON terpisah berdasarkan perannya:
+          * Sisi 'Demand': Negara/pihak yang membutuhkan, membeli, atau menjadi pasar tujuan impor komoditas.
+          * Sisi 'Supply': Negara/pihak yang menyediakan, menjual, menghasilkan, atau mengekspor komoditas.
+        - Analisis kalimat secara mendalam: 
+          * Jika satu negara mengalihkan pembelian dari Negara A ke Negara B, maka muncul 3 objek: 1 Demand (pembeli) dan 2 Supply (pemasok lama dan pemasok baru).
+          * Jika satu negara mengekspor ke beberapa negara tujuan sekaligus (atau beberapa negara menjadi pasar tujuan dari satu negara asal), maka pisahkan setiap negara tujuan sebagai objek 'Demand' tersendiri dan negara asal sebagai objek 'Supply'.
 
         CONTOH LOGIKA EKSTRAKSI (IKUTI POLA PIKIR INI):
+        
+        Contoh Kasus 1 (Pengalihan Pasokan):
         Teks: "Industri manufaktur kemasan plastik nasional mengalihkan pasokan biji plastik dan nafta dari Timur Tengah ke regional ASEAN dan China akibat disrupsi rantai pasok..."
         Hasil Ekstraksi Harus Menghasilkan 3 Objek JSON:
-        1. Negara: Indonesia (Jakarta) -> Status_Pasar: Demand (Karena industri nasional membutuhkan komoditas)
+        1. Negara: Indonesia -> Status_Pasar: Demand (Karena industri nasional membutuhkan komoditas)
         2. Negara: Timur Tengah -> Status_Pasar: Supply (Karena merupakan asal pasokan awal)
         3. Negara: China -> Status_Pasar: Supply (Karena menjadi tujuan pengalihan pasokan baru)
+
+        Contoh Kasus 2 (Multi-Pasar Tujuan):
+        Teks: "Eropa dan Amerika Serikat merupakan pasar tujuan bagi komoditas daun ketapang asal Indonesia."
+        Hasil Ekstra Extraction Harus Menghasilkan 3 Objek JSON:
+        1. Negara: Eropa -> Status_Pasar: Demand (Karena merupakan pasar tujuan/pembeli)
+        2. Negara: Amerika Serikat -> Status_Pasar: Demand (Karena merupakan pasar tujuan/pembeli)
+        3. Negara: Indonesia -> Status_Pasar: Supply (Karena merupakan negara asal komoditas)
 
         Instruksi Pengisian Bidang JSON (Hasilkan Array of Objects):
         1. 'tanggal': Berikan tanggal hari ini (Format: Kamis, 9 Juli 2026).
         2. 'isi_berita_ringkas': Ringkasan inti dari dinamika ekspor komoditas tersebut (maksimal 2-5 kalimat).
         3. 'sumber_berita': Ambil dari tanda kurung siku di akhir paragraf (contoh dari '[Tempo, Bisnis]' menjadi 'Tempo, Bisnis'). Jika tidak ada, isi "-".
-        4. 'komoditas': Nama komoditas/barang fisik utama (contoh: "Biji Plastik dan Nafta").
+        4. 'komoditas': Nama komoditas/barang fisik utama (contoh: "Biji Plastik dan Nafta" atau "Daun Ketapang").
         5. 'status_pasar': Hanya boleh diisi 'Supply' atau 'Demand'.
         6. 'negara': Nama negara pelaku.
-        7. 'kota': Nama kota yang disebutkan, jika tidak ada tulis nama Ibu Kota negara tersebut atau "-".
+        7. 'kota': Nama kota yang disebutkan, jika tidak ada tulis nama Ibu Kota negara tersebut or "-".
         8. 'latitude': Koordinat perkiraan garis lintang (latitude) dari negara/kota tersebut.
         9. 'longitude': Koordinat perkiraan garis bujur (longitude) dari negara/kota tersebut.
         10. 'analisis_makro': Analisis ringkas mengenai peluang, tarif, fluktuasi harga global atau regulasi komoditas tersebut sesuai teks dokumen.
@@ -1145,7 +1182,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
                 print(f"[-] Mengekstrak data menggunakan model: {model_name}...")
                 response = await current_client.aio.models.generate_content(
                     model=model_name,
-                    contents=[uploaded_file, prompt_ekstraksi],  # <--- Menggunakan objek File API cloud
+                    contents=[uploaded_file, prompt_ekstraksi],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=schema_ekstraksi
@@ -1168,17 +1205,18 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         
         if uploaded_file:
             try:
-                await asyncio.to_thread(current_client.files.delete, uploaded_file.name)
+                await asyncio.to_thread(lambda: current_client.files.delete(name=uploaded_file.name))
                 print("[-] Berhasil menghapus file dari storage Gemini Cloud.")
             except Exception as clear_err:
                 print(f"[!] Gagal menghapus file cloud: {clear_err}")
 
     if not response_text:
         print("[!] Gagal menstrukturkan data lewat AI Fallback File API.")
-        return
+        return None
 
     # 5. Parsing Hasil JSON Array dan masukkan ke format baris Google Sheets
     values_to_append = []
+    data_rows = []
 
     try:
         match = re.search(r'\[.*\]', response_text, re.DOTALL)
@@ -1189,9 +1227,39 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         data_rows = json.loads(clean_json)
 
         for item in data_rows:
-            lat = item.get("latitude", "0")
-            lon = item.get("longitude", "0")
-            url_maps = f"https://www.google.com/maps?q={lat},{lon}"
+            # ========================================================
+            # PROSES PARSING & JITTERING KOORDINAT (500M - 1KM)
+            # ========================================================
+            lat_val, lon_val = "0", "0"
+            try:
+                lat_float = float(item.get("latitude", "0"))
+                lon_float = float(item.get("longitude", "0"))
+            except ValueError:
+                lat_float, lon_float = 0.0, 0.0
+
+            if lat_float != 0.0 and lon_float != 0.0:
+                current_coord_str = f"{lat_float:.6f}|{lon_float:.6f}"
+                hitung_geser = 1
+                
+                # Jika koordinat sudah terdaftar di sheet, lakukan pergeseran sejauh 500m - 1km
+                while current_coord_str in existing_coords:
+                    # 500 meter ~ 0.0045 derajat, 1 km ~ 0.0090 derajat ke Bumi
+                    delta_lat = random.uniform(0.0045, 0.0090) * random.choice([-1, 1])
+                    delta_lon = random.uniform(0.0045, 0.0090) * random.choice([-1, 1])
+                    
+                    lat_geser = lat_float + (delta_lat * hitung_geser)
+                    lon_geser = lon_float + (delta_lon * hitung_geser)
+                    
+                    current_coord_str = f"{lat_geser:.6f}|{lon_geser:.6f}"
+                    hitung_geser += 1
+                
+                lat_val, lon_val = current_coord_str.split("|")
+                existing_coords.add(current_coord_str)
+            else:
+                lat_val = item.get("latitude", "0")
+                lon_val = item.get("longitude", "0")
+
+            url_maps = f"https://www.google.com/maps?q={lat_val},{lon_val}"
             
             # Susun kolom rapi untuk baris Spreadsheet Anda
             row_data = [
@@ -1203,8 +1271,8 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
                 item.get("negara", ""),
                 item.get("kota", ""),
                 url_maps,
-                lat,
-                lon,
+                lat_val,
+                lon_val,
                 item.get("analisis_makro", "")
             ]
             values_to_append.append(row_data)
@@ -1221,7 +1289,7 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
                 ).execute()
 
             await asyncio.to_thread(append_to_sheets)
-            print(f"[+] BERHASIL: Menyimpan {len(values_to_append)} data dari File API laporan ekspor ke Google Sheets!")
+            print(f"[+] BERHASIL: Menyimpan {len(values_to_append)} data dari File API laporan ekspor ke Google Sheets (Proteksi Jittering Koordinat Aktif)!")
         else:
             print("[-] Tidak ada data tabel valid yang berhasil diekstrak.")
         
@@ -1229,6 +1297,36 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         print(f"[!] Kendala saat parsing JSON atau pengiriman ke Google Sheets: {err}")
 
     return data_rows
+
+def get_existing_data(spreadsheet_id, target_sheet_name):
+    """Mengambil Nama Usaha, Kota, serta Latitude dan Longitude dari Sheets untuk deteksi duplikat."""
+    try:
+        # Mengambil kolom D (Nama Usaha) sampai I (Longitude)
+        # D=4, E=5, F=6, G=7, H=8 (Lat), I=9 (Lon)
+        range_to_read = f"{target_sheet_name}!D:I"
+        result = sheets_client.values().get(spreadsheetId=spreadsheet_id, range=range_to_read).execute()
+        rows = result.get('values', [])
+        
+        existing_keys = set()
+        existing_coords = set()
+        
+        for row in rows:
+            # Cek duplikat Nama Usaha + Kota (Kolom D dan F)
+            if len(row) >= 3:
+                key = f"{row[0].strip().lower()}|{row[2].strip().lower()}"
+                existing_keys.add(key)
+            
+            # Cek data koordinat (Kolom H dan I -> indeks 4 dan 5 di slice D:I)
+            if len(row) >= 6:
+                lat = row[4].strip()
+                lon = row[5].strip()
+                if lat and lon and lat != "0" and lon != "0":
+                    existing_coords.add(f"{lat}|{lon}")
+                    
+        return existing_keys, existing_coords
+    except Exception as e:
+        print(f"[!] Gagal membaca data lama untuk cek duplikat: {e}")
+        return set(), set()
 
 async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_sheet_name="Data Utama"):
     if not sheets_client:
@@ -1238,6 +1336,10 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
     print(f"\n──────────────────────────────────────")
     print(f"[-] MEMULAI PROSES GOOGLE MAPS WEB SCRAPER (NO API KEY REQUIRED)")
     print(f"──────────────────────────────────────")
+
+    # 1. Ambil data duplikat yang ada di sheet saat ini
+    existing_keys, existing_coords = await asyncio.to_thread(get_existing_data, spreadsheet_id, target_sheet_name)
+    print(f"[*] Menemukan {len(existing_keys)} nama unik dan {len(existing_coords)} koordinat di sheet.")
 
     current_client, current_api_key = await client_rotator.get_client()
     valid_items_to_analyze = []
@@ -1286,13 +1388,14 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
         # 2. PROMPT BATCH AI: MERUMUSKAN 3 TIER KUERI GOOGLE MAPS BERDASARKAN SKALA BISNIS
         prompt_batch_query = """
         Bertindaklah sebagai B2B Lead Generation Specialist & Market Intelligence Internasional.
+        Saya adalah seorang eksportir. Saya ingin melihat demand maupun supply dari suatu komoditas.
         Tugas Anda adalah merumuskan TIGA (3) kueri pencarian lokal spesifik (Bahasa Inggris) untuk dimasukkan ke Google Maps berdasarkan file CSV yang dilampirkan.
 
         TARGET STRATEGI STRUKTUR TIER KUERI (WAJIB PATUH):
         - Jika 'Status_Pasar' bernilai 'Demand' (Pembeli), pecah kueri berdasarkan 3 tingkatan skala bisnis dari kecil ke besar:
-          * Kueri 1 (Tier 1 - Skala Kecil / Konsumen Ritel Komersial): Fokus mencari bisnis pengguna akhir yang langsung menyerap produk (contoh: Kafe, Roastery lokal, Bakery, Restoran lokal, atau Toko kue).
-          * Kueri 2 (Tier 2 - Skala Menengah / Grosir & Distributor): Fokus mencari rantai distribusi tengah (contoh: B2B Wholesaler, local supplier, distributor bahan baku kue/kopi, atau agen komoditas lokal).
-          * Kueri 3 (Tier 3 - Skala Besar / Importir & Industri Manufaktur): Fokus mencari penyerap volume masif (contoh: Main Importer, Trading House internasional, pabrik pengolahan makanan/minuman/F&B factory, atau jaringan hotel & catering skala besar).
+          * Kueri 1 (Tier 1 - Skala Kecil / Konsumen Ritel Komersial): Fokus mencari bisnis pengguna akhir yang langsung menyerap produk (contoh: Kafe, Roastery lokal, Bakery, Restoran lokal).
+          * Kueri 2 (Tier 2 - Skala Menengah / Grosir & Distributor): Fokus mencari rantai distribusi tengah yg berhubungan dengan produk (contoh: B2B Wholesaler, local supplier, distributor bahan baku).
+          * Kueri 3 (Tier 3 - Skala Besar / Importir & Industri Manufaktur): Fokus mencari penyerap volume masif produk (contoh: Main Importer, Trading House internasional, F&B factory).
           
         - Jika 'Status_Pasar' bernilai 'Supply' (Supplier), pecah kueri berdasarkan tingkatan pasokan:
           * Kueri 1 (Tier 1 - Pengrajin/Produsen Kecil): Pembuat lokal, workshop, atau asosiasi petani lokal.
@@ -1421,30 +1524,56 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
                     print(f"        [+] Menemukan {len(places_elements)} profil bisnis terdaftar resmi. Mengekstrak data...")
                     
                     for link_element in places_elements: 
-                        # Ambil Atribut Nama (aria-label) dan URL Koordinat (href) langsung dari elemen utama yang pasti ada
                         place_name = await link_element.get_attribute("aria-label")
                         place_url = await link_element.get_attribute("href")
                         
                         if not place_name or not place_url:
                             continue
-                            
-                        # Ekstrak data Koordinat Geografis langsung dari URL
+                        
+                        # ========================================================
+                        # 1. CEK DUPLIKAT NAMA & KOTA LEBIH AWAL (OPTIMASI)
+                        # ========================================================
+                        current_key = f"{place_name.strip().lower()}|{item['kota'].strip().lower()}"
+                        if current_key in existing_keys:
+                            continue 
+
+                        existing_keys.add(current_key) 
+                        
+                        # ========================================================
+                        # 2. PROSES PARSING & JITTERING KOORDINAT (~100 METER)
+                        # ========================================================
                         lat_val, lon_val = "0", "0"
                         coord_match = re.search(r'!3d([-.\d]+)!4d([-.\d]+)', place_url)
                         if coord_match:
-                            lat_val = coord_match.group(1)
-                            lon_val = coord_match.group(2)
+                            try:
+                                lat_float = float(coord_match.group(1))
+                                lon_float = float(coord_match.group(2))
+                                
+                                current_coord_str = f"{lat_float:.6f}|{lon_float:.6f}"
+                                
+                                hitung_geser = 1
+                                while current_coord_str in existing_coords:
+                                    delta_lat = (0.0009 + random.uniform(-0.0001, 0.0001)) * random.choice([-1, 1])
+                                    delta_lon = (0.0009 + random.uniform(-0.0001, 0.0001)) * random.choice([-1, 1])
+                                    
+                                    lat_geser = lat_float + (delta_lat * hitung_geser)
+                                    lon_geser = lon_float + (delta_lon * hitung_geser)
+                                    
+                                    current_coord_str = f"{lat_geser:.6f}|{lon_geser:.6f}"
+                                    hitung_geser += 1
+                                
+                                lat_val, lon_val = current_coord_str.split("|")
+                                existing_coords.add(current_coord_str)
+                                
+                            except Exception as e:
+                                lat_val = coord_match.group(1)
+                                lon_val = coord_match.group(2)
                             
-                        # =====================================================================
-                        # PROSES EKSTRAKSI KATEGORI VIA PARENT / ANCESTOR SCOPING
-                        # =====================================================================
+                        # Blok duplikat pengecekan nama di bawah ini sudah dihapus
                         kategori_detail = tipe_bisnis_target 
                         
                         try:
-                            # Menggunakan XPath dari link_element untuk memanjat naik ke parent kontainer div[role='article']
-                            # lalu mencari komponen .fontBodyMedium teks kategori di dalamnya secara aman
                             parent_article = await link_element.query_selector("xpath=ancestor::div[@role='article']")
-                            
                             if parent_article:
                                 desc_element = await parent_article.query_selector(".fontBodyMedium div:nth-child(4) div:nth-child(1)")
                                 if desc_element:
@@ -1454,25 +1583,24 @@ async def proses_pencarian_leads_bisnis(data_entitas_ai, spreadsheet_id, target_
                         except Exception:
                             pass
 
-                        # Menghasilkan 4 karakter acak (contoh: 'X7R2')
                         acak_4_char = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-                        id_unik = f"UD{acak_4_char}"  # Hasil akhir pasti 6 karakter (contoh: 'UDX7R2')
+                        id_unik = f"UD{acak_4_char}" 
 
-                        # Simpan row data ke Data Utama
                         row_data = [
-                            id_unik,                                      # ID
-                            str(item["stakeholder"]),                     # Stakeholder
-                            str(item["komoditas"]),                       # Komoditas
-                            str(place_name),                              # Nama Usaha Riil
-                            str(item["negara"]),                          # Negara
-                            str(item["kota"]),                            # Kota
-                            str(place_url),                               # Lokasi (Google Maps URL Riil)
-                            f"{lat_val}",                                 # Latitude
-                            f"{lon_val}",                                 # Longitude
-                            "",                                           # Whatsapp (Kosong)
-                            "",                                           # Website (Bisa dikosongkan/diisi dinamis)
-                            f"{kategori_detail}",                         # Deskripsi Singkat
-                            f"Profil Usaha Fisik ({kategori_detail}) Terdaftar Resmi di Google Maps wilayah {item['kota']}, {item['negara']}." # Deskripsi Lengkap
+                            id_unik,
+                            str(item["stakeholder"]),
+                            str(item["komoditas"]),
+                            str(place_name),
+                            str(item["negara"]),
+                            str(item["kota"]),
+                            str(place_url),
+                            f"{lat_val}",
+                            f"{lon_val}",
+                            "",
+                            "",
+                            f"{kategori_detail}",
+                            f"Profil Usaha Fisik ({kategori_detail}) Terdaftar Resmi di Google Maps wilayah {item['kota']}, {item['negara']}.",
+                            str(maps_query)
                         ]
                         values_to_append.append(row_data)
                         jumlah_per_kueri += 1
