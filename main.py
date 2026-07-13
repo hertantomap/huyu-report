@@ -1125,13 +1125,19 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         # 3. Definisikan PROMPT khusus yang mendeskripsikan isi File Teks Perdagangan tersebut
         prompt_ekstraksi = """
         Bertindaklah sebagai Ahli Data Perdagangan Internasional.
-        Tugas Anda adalah memetakan arus aktivitas Ekspor dan Impor BARANG/KOMODITAS FISIK nyata dari dokumen file teks laporan rangkuman ekspor yang dilampirkan ke dalam format JSON.
+        Tugas Anda adalah memetakan arus aktivitas Ekspor dan Impor BARANG/KOMODITAS FISIK nyata berdasarkan berita di dokumen file teks rangkuman berita ekspor yang saya lampirkan.
         
         ATURAN STRATEGIS UTAMA (WAJIB DIPATUHI - PENYARINGAN KETAT):
-        1. Anda HANYA BOLEH mengekstrak informasi yang membahas perdagangan, transaksi, kebutuhan atau potensi komoditas/barang fisik LINTAS NEGARA (Ekspor-Impor, Kesepakatan Bilateral).
-
+        1. Anda HANYA BOLEH mengekstrak informasi yang membahas perdagangan, transaksi, kebutuhan atau potensi komoditas/barang Ekspor dan Impor.
+        2. LARANGAN KERAS (BLOCKLIST): Anda WAJIB mengabaikan dan tidak memproses data yang berkaitan dengan komoditas strategis/sensitif seperti:
+           - Bahan nuklir atau radioaktif (contoh: Uranium, Plutonium, bahan baku senjata nuklir).
+           - Senjata militer, amunisi, peralatan tempur, teknologi pertahanan, atau komponen persenjataan.
+           - Bahan peledak industri yang secara eksplisit ditujukan untuk penggunaan militer.
+           - Komoditas terlarang lainnya yang bersifat rahasia negara atau melanggar hukum perdagangan internasional yang umum.
+        3. Fokuslah HANYA pada komoditas perdagangan umum seperti produk pertanian, manufaktur, elektronik konsumen, pakaian, tekstil, bahan baku industri non-militer, dan sejenisnya.
+        
         PANDUAN KECERDASAN MULTI-ENTITAS (DEMAND & SUPPLY SPLITTING):
-        - Dokumen ini berisi rangkuman berita ekspor-impor. Jika sebuah berita membahas pergeseran pasar atau transaksi yang melibatkan banyak pihak (baik banyak pemasok maupun banyak pasar tujuan), Anda WAJIB memecahnya menjadi beberapa objek JSON terpisah berdasarkan perannya:
+        - Dokumen ini berisi rangkuman berita ekspor-impor. Jika sebuah berita membahas lalu lintas perdagangan, pergeseran pasar atau transaksi yang melibatkan banyak pihak (baik banyak pemasok maupun banyak pasar tujuan), Anda WAJIB memecahnya menjadi beberapa objek JSON terpisah berdasarkan perannya:
           * Sisi 'Demand': Negara/pihak yang membutuhkan, membeli, atau menjadi pasar tujuan impor komoditas.
           * Sisi 'Supply': Negara/pihak yang menyediakan, menjual, menghasilkan, atau mengekspor komoditas.
         - Analisis kalimat secara mendalam: 
@@ -1154,17 +1160,25 @@ async def proses_analisis_supply_demand_ke_spreadsheet(spreadsheet_id, sheet_nam
         2. Negara: Amerika Serikat -> Status_Pasar: Demand (Karena merupakan pasar tujuan/pembeli)
         3. Negara: Indonesia -> Status_Pasar: Supply (Karena merupakan negara asal komoditas)
 
+        Contoh Kasus 3 (Ekspor):
+        Teks: "Indonesia memperkuat posisi di bioenergi sawit (B50) dan ekonomi halal global. Permintaan tinggi dari pasar negara anggota D-8 (Total 1,3 miliar populasi)"
+        Hasil Ekstra Extraction Harus Menghasilkan 3 Objek JSON:
+        1. Negara: Indonesia -> Status_Pasar: Supply (Karena merupakan negara penghasil Bioenergi sawit B50)
+        2. Negara: Indonesia -> Status_Pasar: Supply (Karena merupakan negara penghasil produk halal)
+        3. Negara: D-8 Member Countries -> Status_Pasar: Demand (Karena merupakan negara dengan permintaan tinggi untuk Bioenergi sawit B50)
+        3. Negara: D-8 Member Countries -> Status_Pasar: Demand (Karena merupakan negara dengan permintaan tinggi untuk produk halal)
+
         Instruksi Pengisian Bidang JSON (Hasilkan Array of Objects):
         1. 'tanggal': (TIDAK PERLU DIISI, KOSONGKAN SAJA).
         2. 'isi_berita_ringkas': Ringkasan inti dari dinamika ekspor komoditas tersebut (maksimal 2-5 kalimat).
-        3. 'sumber_berita': Ambil dari tanda kurung siku di akhir paragraf (contoh dari '[Tempo, Bisnis]' menjadi 'Tempo, Bisnis'). Jika tidak ada, isi "-".
+        3. 'sumber_berita': Ambil url dari berita tersebut. Jika tidak ada maka ambil dari tanda kurung siku di akhir paragraf (contoh dari '[Tempo, Bisnis]' menjadi 'Tempo, Bisnis'). Jika tidak ada, isi "-".
         4. 'komoditas': Nama komoditas/barang fisik utama (contoh: "Biji Plastik dan Nafta" atau "Daun Ketapang").
         5. 'status_pasar': Hanya boleh diisi 'Supply' atau 'Demand'.
         6. 'negara': Nama negara pelaku.
         7. 'kota': Nama kota yang disebutkan, jika tidak ada tulis nama Ibu Kota negara tersebut or "-".
         8. 'latitude': Koordinat perkiraan garis lintang (latitude) dari negara/kota tersebut.
         9. 'longitude': Koordinat perkiraan garis bujur (longitude) dari negara/kota tersebut.
-        10. 'analisis_makro': Analisis ringkas mengenai peluang, tarif, fluktuasi harga global atau regulasi komoditas tersebut sesuai teks dokumen.
+        10. 'analisis_makro': Analisis secara makro untuk data ini sesuai teks dokumen.
         """
 
         # Skema Output JSON Array untuk Google Sheets (10 Kolom data olahan)
